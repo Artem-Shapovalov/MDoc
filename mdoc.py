@@ -1182,44 +1182,57 @@ if PYSIDE_AVAILABLE:
                     fmt.setFontWeight(QFont.Bold)
                 self.formats[name] = fmt
             self.lexers = {"python": PythonLexer(), "py": PythonLexer(), "c": CLexer(), "cpp": CppLexer(), "c++": CppLexer(), "h": CppLexer(), "hpp": CppLexer(), "java": JavaLexer(), "tex": TexLexer()}
-            self.in_code = False
-            self.lang = ""
             self.puml_words = {"@startuml", "@enduml", "participant", "actor", "component", "database", "package", "note", "skinparam", "rectangle"}
 
+        def _prev_block_info(self) -> Tuple[bool, str, str]:
+            prev = self.currentBlock().previous()
+            if not prev.isValid():
+                return False, "", ""
+            data = prev.userData()
+            if data is None:
+                return False, "", ""
+            return bool(getattr(data, "inside_code", False)), getattr(data, "lang", "") or "", getattr(data, "fence", "") or ""
+
         def highlightBlock(self, text: str) -> None:
-            if self.previousBlockState() == 1:
-                self.in_code = True
-            if FENCE_RE.match(text):
-                self.setFormat(0, len(text), self.formats["fence"])
-                if self.previousBlockState() == 1:
+            prev_inside, prev_lang, prev_fence = self._prev_block_info()
+            m = FENCE_RE.match(text)
+            if prev_inside:
+                if m and (m.group(1) == prev_fence):
+                    self.setFormat(0, len(text), self.formats["fence"])
                     self.setCurrentBlockState(0)
-                    self._set_lang_userdata("")
+                    self._set_block_userdata(False, "", "")
                     return
-                m = FENCE_RE.match(text)
-                self.lang = (m.group(1) or "").strip().lower() if m else ""
                 self.setCurrentBlockState(1)
-                self._set_lang_userdata(self.lang)
+                self._set_block_userdata(True, prev_lang, prev_fence)
+                self._highlight_code(text, prev_lang)
                 return
-            if self.previousBlockState() == 1:
+
+            if m:
+                fence = m.group(1)
+                lang = (m.group(2) or "").strip().lower()
+                self.setFormat(0, len(text), self.formats["fence"])
                 self.setCurrentBlockState(1)
-                self._set_lang_userdata(self.lang)
-                self._highlight_code(text, self.lang)
+                self._set_block_userdata(True, lang, fence)
                 return
-            self._set_lang_userdata("")
+
+            self.setCurrentBlockState(0)
+            self._set_block_userdata(False, "", "")
             if text.lstrip().startswith("#"):
                 self.setFormat(0, len(text), self.formats["heading"])
             elif "|" in text:
                 self.setFormat(0, len(text), self.formats["table"])
 
-        def _set_lang_userdata(self, lang: str) -> None:
+        def _set_block_userdata(self, inside_code: bool, lang: str, fence: str) -> None:
             block = self.currentBlock()
-            block.setUserState(1 if lang else 0)
+            block.setUserState(1 if inside_code else 0)
             data = block.userData()
             if data is None:
                 from PySide6.QtGui import QTextBlockUserData
                 data = QTextBlockUserData()
                 block.setUserData(data)
+            setattr(data, "inside_code", inside_code)
             setattr(data, "lang", lang)
+            setattr(data, "fence", fence)
 
         def _highlight_code(self, text: str, lang: str) -> None:
             lexer = self.lexers.get(lang)
@@ -1334,9 +1347,12 @@ if PYSIDE_AVAILABLE:
                 self.show_completions()
                 return
             if event.key() in (Qt.Key_Return, Qt.Key_Enter) and self.completer.popup().isVisible():
-                current_index = self.completer.popup().currentIndex()
-                current = current_index.data() if current_index.isValid() else self.completer.currentCompletion()
+                current_index = self.completer.popup().selectionModel().currentIndex()
+                if not current_index.isValid():
+                    current_index = self.completer.popup().currentIndex()
+                current = current_index.data() if current_index.isValid() else None
                 if current:
+                    event.accept()
                     self.insert_completion(str(current))
                     self.completer.popup().hide()
                     return
@@ -1350,6 +1366,8 @@ if PYSIDE_AVAILABLE:
 
         def current_block_language(self) -> Optional[str]:
             data = self.textCursor().block().userData()
+            if data is None or not getattr(data, "inside_code", False):
+                return None
             return getattr(data, "lang", None)
 
         def show_completions(self) -> None:
