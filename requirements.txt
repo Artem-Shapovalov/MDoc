@@ -1,0 +1,5 @@
+Pillow
+Pygments
+reportlab
+matplotlib
+PySide6
