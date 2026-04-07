@@ -1,25 +1,106 @@
 # MDoc
 
-MDoc is a FOSS markdown-based document previewer and PDF exporter for technical documents.
+![mdoc](./mdoc.png)        
 
-It supports paged A4 preview and export, PlantUML diagrams rendered as bitmaps, TeX formulas rendered as bitmaps, tables, a title page, a generated table of contents, and manual page breaks.
+Free and open-source markdown-based document previewer and PDF exporter for technical documents.
+Aimed to make documents AI compatable as well a human readable.
 
-## Features
+# DISCLAIMER
 
-- Split desktop UI: source editor on the left, paged preview on the right
-- A4 preview with page shadows
-- PDF export with embedded fonts
-- Markdown tables with repeated table headers across pages
-- Fenced `plantuml` / `puml` blocks
-- Fenced `tex` blocks
-- Title page from the first `# Title: ...` block up to the first `# TOC` or the next `# Title: ...`
-- Generated table of contents from headings
-- Manual page breaks with `<!-- pagebreak -->`
-- CLI export mode without starting the GUI
+THIS IS A FUNCTIONAL PROTOTYPE.
 
-## Document conventions
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
-### Title page
+# Features
+
+- PlantUML code blocks to render UML diagrams
+- TeX code blocks to render formulas
+- Title page and Table of Context based on headings
+- Page breaks
+- Completion for code blocks with [Ctrl] + [Space]
+- Syntax highlighting in editor
+- Nested code blocks
+- Tables are moved to a new page with the heading repeated
+- Raw text editing with live preview
+- PDF export with embedded fonts and pictures, CLI export also awailable
+
+# Additional software needed
+
+This program utilizes next software and you need to install it manually:
+- Python 3.10+
+- Java Runtime Environment
+- PlantUML
+- Graphviz
+- DejaVu fonts
+
+For Ubuntu:
+```
+sudo apt update
+
+sudo apt install -y \
+    python3 \
+    python3-venv \
+    python3-pip \
+    default-jre \
+    plantuml \
+    graphviz \
+    fonts-dejavu
+```
+
+Debian:
+```
+sudo apt update
+
+sudo apt install -y \
+    python3 \
+    python3-venv \
+    python3-pip \
+    default-jre \
+    plantuml \
+    graphviz \
+    fonts-dejavu
+```
+
+Fedora:
+```
+sudo dnf install -y \
+    python3 \
+    python3-pip \
+    java-latest-openjdk \
+    plantuml \
+    graphviz \
+    dejavu-sans-fonts \
+    dejavu-serif-fonts \
+    dejavu-sans-mono-fonts
+```
+
+Arch:
+```
+sudo pacman -Syu --needed \
+    python \
+    python-pip \
+    jre-openjdk \
+    plantuml \
+    graphviz \
+    ttf-dejavu
+```
+
+# Build and run
+
+Use the following scripts:
+- build.sh makes deployable single-file executable
+- run.sh just runst the current project code
+- install.sh builds the application and copies it to /usr/bin
+
+# Features overview
+
+## Title page
 
 ```markdown
 # Title: My Document Title
@@ -32,7 +113,7 @@ Optional markdown content for the title page.
 Everything between the first `# Title:` and the first `# TOC` is treated as the title page.  
 If a second `# Title:` appears before `# TOC`, the title page ends before that second marker.
 
-### Table of contents
+## Table of contents
 
 ```markdown
 # TOC
@@ -40,15 +121,15 @@ If a second `# Title:` appears before `# TOC`, the title page ends before that s
 
 Only the first `# TOC` is treated specially.
 
-### Manual page break
+## Manual page break
 
 ```html
 <!-- pagebreak -->
 ```
 
-Keyboard shortcut in the editor: `Ctrl + Enter`
+Keyboard shortcut in the editor: [Ctrl] + [Enter]
 
-### PlantUML
+## PlantUML
 
 ````markdown
 ```plantuml
@@ -58,7 +139,9 @@ Alice -> Bob: Hello
 ```
 ````
 
-### TeX
+While editing inside the block press [Ctrl] + [Space] to complete.
+
+## TeX
 
 ````markdown
 ```tex
@@ -66,51 +149,13 @@ Alice -> Bob: Hello
 ```
 ````
 
-## Running from source
+While editing inside the block press [Ctrl] + [Space] to complete.
 
-The project uses a local `.venv`.
 
-### Start the GUI
-
-```bash
-./run.sh path/to/document.md
-```
-
-### Export a PDF from the command line
+## Export a PDF from the command line
 
 ```bash
-./run.sh --export-pdf path/to/document.md -o output.pdf
+mdoc --export-pdf path/to/document.md -o output.pdf
 ```
 
 If no output path is given, the PDF is written next to the input file with the `.pdf` extension.
-
-## Building a standalone executable
-
-```bash
-./build.sh
-```
-
-The resulting binary is placed in `dist/`.
-
-## Additional software required for full functionality
-
-Install these on the system if you want all rendering features:
-
-- Python 3.10+
-- Java Runtime Environment
-- PlantUML
-- Graphviz
-- DejaVu fonts
-
-Without PlantUML and Graphviz, PlantUML blocks cannot render.  
-Without DejaVu fonts, PDF export will fail because embedded fonts are required.
-
-## Notes
-
-- `Tab` inserts 8 spaces.
-- Completion popup is available with `Ctrl + Space` inside fenced code blocks only.
-- The preview and the editor are intentionally not synchronized.
-
-## License
-
-MIT License. See `LICENSE`.
