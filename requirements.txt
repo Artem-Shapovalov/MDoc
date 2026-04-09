@@ -3,3 +3,4 @@ Pygments
 reportlab
 matplotlib
 PySide6
+CairoSVG

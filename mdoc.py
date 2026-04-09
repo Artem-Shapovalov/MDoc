@@ -35,6 +35,12 @@ except Exception:
     MATPLOTLIB_AVAILABLE = False
 
 try:
+    import cairosvg
+    CAIROSVG_AVAILABLE = True
+except Exception:
+    CAIROSVG_AVAILABLE = False
+
+try:
     from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal, QObject, QRunnable, QThreadPool, QStringListModel
     from PySide6.QtGui import (
         QAction,
@@ -526,10 +532,24 @@ class AssetRenderer:
         ImageOps.expand(img, border=16, fill=(255, 255, 255, 0)).save(out)
         return str(out)
 
+    def _rasterize_svg(self, path: Path) -> str:
+        if not CAIROSVG_AVAILABLE:
+            raise RenderError("CairoSVG is required for SVG image support in this build.")
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        out = self.cache.path_for("svg", digest)
+        if out.exists():
+            return str(out)
+        try:
+            cairosvg.svg2png(bytestring=data, write_to=str(out), dpi=self.dpi)
+        except Exception as exc:
+            raise RenderError(f"SVG render failed: {exc}") from exc
+        return str(out)
+
     def resolve_image(self, src: str) -> str:
         parsed = urllib.parse.urlparse(src)
         if parsed.scheme in ("http", "https"):
-            suffix = Path(parsed.path).suffix or ".img"
+            suffix = Path(parsed.path).suffix.lower() or ".img"
             digest = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
             name = f".mdoc_img_{digest}{suffix}"
             out = self.base_dir / name
@@ -540,12 +560,16 @@ class AssetRenderer:
                     out.write_bytes(data)
             except urllib.error.URLError as exc:
                 raise RenderError(f"Failed to load image URL: {src}") from exc
+            if out.suffix.lower() in (".svg", ".svgz"):
+                return self._rasterize_svg(out)
             return str(out)
         path = Path(src)
         if not path.is_absolute():
             path = (self.base_dir / src).resolve()
         if not path.exists():
             raise RenderError(f"Image not found: {src}")
+        if path.suffix.lower() in (".svg", ".svgz"):
+            return self._rasterize_svg(path)
         return str(path)
 
 
@@ -1788,27 +1812,46 @@ if PYSIDE_AVAILABLE:
             self.page_rects: List[QRect] = []
             self._viewport_width = 500
             self._zoom_factor = 1.0
+            self._fit_zoom_factor = 1.0
+            self._user_zoomed = False
             self.setMinimumWidth(360)
 
         def set_viewport_width(self, width: int) -> None:
             self._viewport_width = max(100, width)
-            self.setMinimumHeight(self._content_height())
-            self.updateGeometry()
-            self.update()
+            self._recompute_fit_zoom()
+            self._refresh_geometry()
 
         def set_zoom_factor(self, value: float) -> None:
             self._zoom_factor = max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, float(value)))
-            self.setMinimumHeight(self._content_height())
-            self.updateGeometry()
-            self.update()
+            self._user_zoomed = True
+            self._refresh_geometry()
+
+        def _recompute_fit_zoom(self) -> None:
+            if not self.page_pixmaps:
+                self._fit_zoom_factor = 1.0
+                return
+            max_source_w = max(p.width() for p in self.page_pixmaps)
+            available = max(100, self._viewport_width - 40 - PAGE_SHADOW_PX)
+            self._fit_zoom_factor = max(PREVIEW_ZOOM_MIN, min(1.0, available / max_source_w))
+            if not self._user_zoomed:
+                self._zoom_factor = self._fit_zoom_factor
+
+        def reset_fit_zoom(self) -> None:
+            self._user_zoomed = False
+            self._recompute_fit_zoom()
+            self._refresh_geometry()
 
         def _page_scale(self) -> float:
             if not self.page_pixmaps:
                 return 1.0
-            max_source_w = max(p.width() for p in self.page_pixmaps)
-            available = max(100, self._viewport_width - 40 - PAGE_SHADOW_PX)
-            base_scale = min(1.0, available / max_source_w)
-            return max(0.05, base_scale * self._zoom_factor)
+            return max(0.05, self._zoom_factor)
+
+        def _content_width(self) -> int:
+            if not self.page_pixmaps:
+                return max(420, self._viewport_width)
+            scale = self._page_scale()
+            max_w = max(int(p.width() * scale) for p in self.page_pixmaps)
+            return max_w + 30 + PAGE_SHADOW_PX * 2
 
         def _content_height(self) -> int:
             scale = self._page_scale()
@@ -1817,14 +1860,15 @@ if PYSIDE_AVAILABLE:
                 total += int(pix.height() * scale) + PAGE_GAP_PX
             return total + 10
 
+        def _refresh_geometry(self) -> None:
+            self.setMinimumWidth(self._content_width())
+            self.setMinimumHeight(self._content_height())
+            self.resize(self.sizeHint())
+            self.updateGeometry()
+            self.update()
+
         def sizeHint(self):
-            if self.page_pixmaps:
-                scale = self._page_scale()
-                max_w = max(int(p.width() * scale) for p in self.page_pixmaps)
-                total_w = max_w + 30 + PAGE_SHADOW_PX * 2
-            else:
-                total_w = max(420, self._viewport_width)
-            return QSize(total_w, self._content_height())
+            return QSize(self._content_width(), self._content_height())
 
         def set_pages(self, images: List[bytes]) -> None:
             self.page_pixmaps = []
@@ -1832,13 +1876,11 @@ if PYSIDE_AVAILABLE:
                 pix = QPixmap()
                 pix.loadFromData(data, "PNG")
                 self.page_pixmaps.append(pix)
-            self.setMinimumHeight(self._content_height())
-            self.updateGeometry()
-            self.update()
+            self._recompute_fit_zoom()
+            self._refresh_geometry()
 
         def resizeEvent(self, event) -> None:
             super().resizeEvent(event)
-            self.setMinimumHeight(self._content_height())
             self.update()
 
         def paintEvent(self, event) -> None:
