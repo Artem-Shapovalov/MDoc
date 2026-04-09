@@ -1,6 +1,8 @@
+![logo](./logo.svg)
+
 # MDoc
 
-![mdoc](./mdoc.png)        
+![mdoc](./mdoc.png)
 
 Free and open-source markdown-based document previewer and PDF exporter for technical documents.
 Aimed to make documents AI compatable as well a human readable.

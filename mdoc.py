@@ -80,6 +80,9 @@ PREVIEW_MARGIN_PX = int(PAGE_MARGIN_PT / 72.0 * PREVIEW_DPI)
 PAGE_GAP_PX = 10
 PAGE_BORDER_PX = 1
 PAGE_SHADOW_PX = 6
+PREVIEW_ZOOM_MIN = 0.25
+PREVIEW_ZOOM_MAX = 4.00
+PREVIEW_ZOOM_STEP = 1.12
 EDITOR_SYNC_GUARD_MS = 120
 
 TITLE_LINE_RE = re.compile(r"^\s*#\s+Title:\s*(.+?)\s*$")
@@ -1716,6 +1719,65 @@ if PYSIDE_AVAILABLE:
                 self.centerCursor()
 
 
+    class PreviewScrollArea(QScrollArea):
+        zoomChanged = Signal(float)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._zoom_factor = 1.0
+            self.setWidgetResizable(False)
+
+        def zoom_factor(self) -> float:
+            return self._zoom_factor
+
+        def set_zoom_factor(self, value: float, anchor_pos=None) -> None:
+            value = max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, float(value)))
+            if abs(value - self._zoom_factor) < 1e-6:
+                return
+
+            old_zoom = self._zoom_factor
+            self._zoom_factor = value
+
+            widget = self.widget()
+            if widget is not None and hasattr(widget, "set_zoom_factor"):
+                widget.set_zoom_factor(self._zoom_factor)
+
+            self.zoomChanged.emit(self._zoom_factor)
+
+            if anchor_pos is not None:
+                hbar = self.horizontalScrollBar()
+                vbar = self.verticalScrollBar()
+                scene_x = hbar.value() + anchor_pos.x()
+                scene_y = vbar.value() + anchor_pos.y()
+                ratio = self._zoom_factor / old_zoom if old_zoom > 0 else 1.0
+                hbar.setValue(int(scene_x * ratio - anchor_pos.x()))
+                vbar.setValue(int(scene_y * ratio - anchor_pos.y()))
+
+        def resizeEvent(self, event) -> None:
+            super().resizeEvent(event)
+            widget = self.widget()
+            if widget is not None and hasattr(widget, "set_viewport_width"):
+                widget.set_viewport_width(self.viewport().width())
+
+        def wheelEvent(self, event) -> None:
+            mods = event.modifiers()
+            if mods & Qt.ControlModifier:
+                delta = event.angleDelta().y()
+                if delta:
+                    step = PREVIEW_ZOOM_STEP if delta > 0 else (1.0 / PREVIEW_ZOOM_STEP)
+                    self.set_zoom_factor(self._zoom_factor * step, event.position().toPoint())
+                event.accept()
+                return
+
+            if mods & Qt.ShiftModifier:
+                amount = event.angleDelta().y() or event.angleDelta().x()
+                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - amount)
+                event.accept()
+                return
+
+            super().wheelEvent(event)
+
+
     class PreviewWidget(QWidget):
         pageClicked = Signal(int)
         previewCenteredAtPage = Signal(int)
@@ -1724,14 +1786,29 @@ if PYSIDE_AVAILABLE:
             super().__init__()
             self.page_pixmaps: List[QPixmap] = []
             self.page_rects: List[QRect] = []
+            self._viewport_width = 500
+            self._zoom_factor = 1.0
             self.setMinimumWidth(360)
+
+        def set_viewport_width(self, width: int) -> None:
+            self._viewport_width = max(100, width)
+            self.setMinimumHeight(self._content_height())
+            self.updateGeometry()
+            self.update()
+
+        def set_zoom_factor(self, value: float) -> None:
+            self._zoom_factor = max(PREVIEW_ZOOM_MIN, min(PREVIEW_ZOOM_MAX, float(value)))
+            self.setMinimumHeight(self._content_height())
+            self.updateGeometry()
+            self.update()
 
         def _page_scale(self) -> float:
             if not self.page_pixmaps:
                 return 1.0
             max_source_w = max(p.width() for p in self.page_pixmaps)
-            available = max(100, self.width() - 40 - PAGE_SHADOW_PX)
-            return min(1.0, available / max_source_w)
+            available = max(100, self._viewport_width - 40 - PAGE_SHADOW_PX)
+            base_scale = min(1.0, available / max_source_w)
+            return max(0.05, base_scale * self._zoom_factor)
 
         def _content_height(self) -> int:
             scale = self._page_scale()
@@ -1741,7 +1818,13 @@ if PYSIDE_AVAILABLE:
             return total + 10
 
         def sizeHint(self):
-            return QSize(max(420, self.width()), self._content_height())
+            if self.page_pixmaps:
+                scale = self._page_scale()
+                max_w = max(int(p.width() * scale) for p in self.page_pixmaps)
+                total_w = max_w + 30 + PAGE_SHADOW_PX * 2
+            else:
+                total_w = max(420, self._viewport_width)
+            return QSize(total_w, self._content_height())
 
         def set_pages(self, images: List[bytes]) -> None:
             self.page_pixmaps = []
@@ -1815,9 +1898,9 @@ if PYSIDE_AVAILABLE:
 
             self.editor = CodeEditor()
             self.preview = PreviewWidget()
-            self.scroll = QScrollArea()
-            self.scroll.setWidgetResizable(True)
+            self.scroll = PreviewScrollArea()
             self.scroll.setWidget(self.preview)
+            self.preview.set_viewport_width(self.scroll.viewport().width())
             self.status = QLabel()
             self.status.setFixedHeight(24)
             self.status.setStyleSheet("padding: 2px 8px; color: #333; background: #efefef; border-top: 1px solid #d0d0d0;")
