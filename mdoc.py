@@ -9,6 +9,9 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -84,6 +87,9 @@ TOC_LINE_RE = re.compile(r"^\s*#\s+TOC\s*$")
 PAGEBREAK_RE = re.compile(r"^\s*<!--\s*pagebreak\s*-->\s*$")
 FENCE_RE = re.compile(r"^([`~]{3,})\s*([A-Za-z0-9_+#.-]*)\s*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$")
+LIST_ITEM_RE = re.compile(r"^(\s*)([-+*]|\d+\.|[A-Za-z]\.)\s+(.*)$")
+IMAGE_ONLY_RE = re.compile(r"^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$")
+INLINE_TOKEN_RE = re.compile(r"(!?\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
 
 
 def pt_to_px(v: float) -> int:
@@ -113,6 +119,34 @@ class Style:
     align: str = "left"
     color: Tuple[int, int, int] = (0, 0, 0)
     bold: bool = False
+
+
+@dataclass
+class InlineRun:
+    text: str
+    bold: bool = False
+    italic: bool = False
+    code: bool = False
+    link: Optional[str] = None
+
+
+@dataclass
+class RichTextElement:
+    x: float
+    y: float
+    width: float
+    lines: List[List[InlineRun]]
+    style: Style
+    line_indents: List[float] = field(default_factory=list)
+
+
+@dataclass
+class ListItemData:
+    level: int
+    marker: str
+    ordered: bool
+    text: str
+    start_line: int
 
 
 @dataclass
@@ -157,7 +191,7 @@ class TOCEntryElement:
     page_number: int
 
 
-PageElement = TextElement | ImageElement | TablePartElement | TOCEntryElement
+PageElement = RichTextElement | TextElement | ImageElement | TablePartElement | TOCEntryElement
 
 
 @dataclass
@@ -200,6 +234,16 @@ class FontRegistry:
             "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
         ])
+        self.sans_italic_path = self._find_font([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Oblique.ttf",
+        ])
+        self.sans_bold_italic_path = self._find_font([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-BoldOblique.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-BoldOblique.ttf",
+        ])
         self.mono_path = self._find_font([
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
             "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
@@ -213,7 +257,7 @@ class FontRegistry:
         if not self.sans_path or not self.sans_bold_path or not self.mono_path or not self.mono_bold_path:
             raise RenderError("DejaVu fonts were not found on the system. Install dejavu fonts.")
         self._registered = False
-        self._pil_cache: Dict[Tuple[str, int, bool], ImageFont.FreeTypeFont] = {}
+        self._pil_cache: Dict[Tuple[str, int, bool, bool], ImageFont.FreeTypeFont] = {}
 
     @staticmethod
     def _find_font(candidates: Sequence[str]) -> Optional[str]:
@@ -227,22 +271,41 @@ class FontRegistry:
             return
         pdfmetrics.registerFont(TTFont("DDSans", self.sans_path))
         pdfmetrics.registerFont(TTFont("DDSans-Bold", self.sans_bold_path))
+        pdfmetrics.registerFont(TTFont("DDSans-Italic", self.sans_italic_path or self.sans_path))
+        pdfmetrics.registerFont(TTFont("DDSans-BoldItalic", self.sans_bold_italic_path or self.sans_bold_path))
         pdfmetrics.registerFont(TTFont("DDMono", self.mono_path))
         pdfmetrics.registerFont(TTFont("DDMono-Bold", self.mono_bold_path))
         self._registered = True
 
-    def pil_font(self, family: str, size_px: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-        key = (family, size_px, bold)
+    def pil_font(self, family: str, size_px: int, bold: bool = False, italic: bool = False) -> ImageFont.FreeTypeFont:
+        key = (family, size_px, bold, italic)
         if key in self._pil_cache:
             return self._pil_cache[key]
         if family == "mono":
             path = self.mono_bold_path if bold else self.mono_path
         else:
-            path = self.sans_bold_path if bold else self.sans_path
+            if bold and italic:
+                path = self.sans_bold_italic_path or self.sans_bold_path
+            elif bold:
+                path = self.sans_bold_path
+            elif italic:
+                path = self.sans_italic_path or self.sans_path
+            else:
+                path = self.sans_path
         font = ImageFont.truetype(path, size_px)
         self._pil_cache[key] = font
         return font
 
+    def reportlab_font_name(self, family: str, bold: bool = False, italic: bool = False) -> str:
+        if family == "mono":
+            return "DDMono-Bold" if bold else "DDMono"
+        if bold and italic:
+            return "DDSans-BoldItalic"
+        if bold:
+            return "DDSans-Bold"
+        if italic:
+            return "DDSans-Italic"
+        return "DDSans"
 
 
 class BlockParser:
@@ -333,19 +396,36 @@ class BlockParser:
                 i += 1
                 continue
 
-            if stripped.startswith(("- ", "* ", "+ ")) or re.match(r"^\d+\.\s+", stripped):
+            if LIST_ITEM_RE.match(line):
                 flush_paragraph(i)
                 start = i + 1
-                ordered = bool(re.match(r"^\d+\.\s+", stripped))
-                items: List[str] = []
+                items: List[ListItemData] = []
                 while i < len(lines):
-                    s = lines[i].strip()
-                    if s.startswith(("- ", "* ", "+ ")) or re.match(r"^\d+\.\s+", s):
-                        items.append(re.sub(r"^(?:[-*+]\s+|\d+\.\s+)", "", s))
-                        i += 1
-                    else:
+                    if not lines[i].strip():
+                        if i + 1 < len(lines) and LIST_ITEM_RE.match(lines[i + 1]):
+                            i += 1
+                            continue
                         break
-                blocks.append(Block("list", start, i, text="\n".join(items), meta={"ordered": ordered}))
+                    m_item = LIST_ITEM_RE.match(lines[i])
+                    if m_item:
+                        indent, marker, item_text = m_item.groups()
+                        level = max(0, len(indent.expandtabs(4)) // 4)
+                        items.append(ListItemData(level=level, marker=marker, ordered=marker.endswith('.'), text=item_text.strip(), start_line=i + 1))
+                        i += 1
+                        continue
+                    if items:
+                        items[-1].text += " " + lines[i].strip()
+                        i += 1
+                        continue
+                    break
+                blocks.append(Block("list", start, i, meta={"items": items}))
+                continue
+
+            m_img = IMAGE_ONLY_RE.match(line)
+            if m_img:
+                flush_paragraph(i)
+                blocks.append(Block("image", i + 1, i + 1, meta={"alt": m_img.group(1), "src": m_img.group(2).strip()}))
+                i += 1
                 continue
 
             if "|" in line and i + 1 < len(lines) and TABLE_SEP_RE.match(lines[i + 1]):
@@ -384,10 +464,11 @@ class RenderCache:
 
 
 class AssetRenderer:
-    def __init__(self, plantuml_cmd: str = "plantuml", dpi: int = 300) -> None:
+    def __init__(self, plantuml_cmd: str = "plantuml", dpi: int = 300, base_dir: Optional[str] = None) -> None:
         self.plantuml_cmd = plantuml_cmd
         self.dpi = dpi
         self.cache = RenderCache()
+        self.base_dir = Path(base_dir or os.getcwd())
 
     def render_plantuml(self, source: str) -> str:
         out = self.cache.path_for("plantuml", source)
@@ -427,6 +508,28 @@ class AssetRenderer:
         img = Image.open(out).convert("RGBA")
         ImageOps.expand(img, border=16, fill=(255, 255, 255, 0)).save(out)
         return str(out)
+
+    def resolve_image(self, src: str) -> str:
+        parsed = urllib.parse.urlparse(src)
+        if parsed.scheme in ("http", "https"):
+            suffix = Path(parsed.path).suffix or ".img"
+            digest = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+            name = f".mdoc_img_{digest}{suffix}"
+            out = self.base_dir / name
+            try:
+                with urllib.request.urlopen(src, timeout=10) as r:
+                    data = r.read()
+                if not out.exists() or out.read_bytes() != data:
+                    out.write_bytes(data)
+            except urllib.error.URLError as exc:
+                raise RenderError(f"Failed to load image URL: {src}") from exc
+            return str(out)
+        path = Path(src)
+        if not path.is_absolute():
+            path = (self.base_dir / src).resolve()
+        if not path.exists():
+            raise RenderError(f"Image not found: {src}")
+        return str(path)
 
 
 class Measure:
@@ -474,6 +577,120 @@ class Measure:
 
     def text_height(self, lines: List[str], style: Style) -> float:
         return len(lines) * style.leading
+
+    def parse_inline(self, text: str) -> List[InlineRun]:
+        text = html_unescape_minimal(text)
+        runs: List[InlineRun] = []
+        pos = 0
+        for m in INLINE_TOKEN_RE.finditer(text):
+            if m.start() > pos:
+                runs.append(InlineRun(text[pos:m.start()]))
+            tok = m.group(0)
+            if tok.startswith('!['):
+                mm = re.match(r'!\[([^\]]*)\]\(([^)]+)\)', tok)
+                runs.append(InlineRun(mm.group(1) if mm else '[image]'))
+            elif tok.startswith('['):
+                mm = re.match(r'\[([^\]]+)\]\(([^)]+)\)', tok)
+                if mm:
+                    runs.append(InlineRun(mm.group(1), link=mm.group(2)))
+                else:
+                    runs.append(InlineRun(tok))
+            elif tok.startswith('**') and tok.endswith('**'):
+                runs.append(InlineRun(tok[2:-2], bold=True))
+            elif tok.startswith('*') and tok.endswith('*'):
+                runs.append(InlineRun(tok[1:-1], italic=True))
+            elif tok.startswith('`') and tok.endswith('`'):
+                runs.append(InlineRun(tok[1:-1], code=True))
+            else:
+                runs.append(InlineRun(tok))
+            pos = m.end()
+        if pos < len(text):
+            runs.append(InlineRun(text[pos:]))
+        return runs
+
+    def _font_name_for_run(self, run: InlineRun) -> str:
+        family = 'mono' if run.code else 'sans'
+        return self.fonts.reportlab_font_name(family, run.bold, run.italic)
+
+    def _tokenize_runs(self, runs: List[InlineRun]) -> List[InlineRun]:
+        out: List[InlineRun] = []
+        for run in runs:
+            parts = re.split(r'(\s+)', run.text)
+            for part in parts:
+                if part == '':
+                    continue
+                out.append(InlineRun(part, run.bold, run.italic, run.code, run.link))
+        return out
+
+    def _run_width(self, run: InlineRun, style: Style) -> float:
+        return pdfmetrics.stringWidth(run.text, self._font_name_for_run(run), style.font_size)
+
+    def wrap_inline(self, runs: List[InlineRun], style: Style, max_width: float) -> List[List[InlineRun]]:
+        tokens = self._tokenize_runs(runs)
+        lines: List[List[InlineRun]] = []
+        current: List[InlineRun] = []
+        current_w = 0.0
+        for token in tokens:
+            is_space = token.text.isspace()
+            width = self._run_width(token, style)
+            if not current and is_space:
+                continue
+            if current and current_w + width > max_width and not is_space:
+                lines.append(current)
+                current = []
+                current_w = 0.0
+            if not current and is_space:
+                continue
+            current.append(token)
+            current_w += width
+        if current or not lines:
+            lines.append(current)
+        return lines
+
+    def wrap_list_item(self, prefix: str, body_runs: List[InlineRun], style: Style, max_width: float) -> Tuple[List[List[InlineRun]], List[float]]:
+        prefix_runs = [InlineRun(prefix)]
+        prefix_width = sum(self._run_width(t, style) for t in self._tokenize_runs(prefix_runs))
+        body_tokens = self._tokenize_runs(body_runs)
+        lines: List[List[InlineRun]] = []
+        indents: List[float] = []
+        first_line = prefix_runs.copy()
+        line_w = prefix_width
+        idx = 0
+        while idx < len(body_tokens):
+            tok = body_tokens[idx]
+            is_space = tok.text.isspace()
+            width = self._run_width(tok, style)
+            if len(first_line) == len(prefix_runs) and is_space:
+                idx += 1
+                continue
+            if line_w + width > max_width and not is_space and len(first_line) > len(prefix_runs):
+                break
+            first_line.append(tok)
+            line_w += width
+            idx += 1
+        lines.append(first_line)
+        indents.append(0.0)
+        max_rest = max_width - prefix_width
+        while idx < len(body_tokens):
+            line: List[InlineRun] = []
+            line_w = 0.0
+            while idx < len(body_tokens):
+                tok = body_tokens[idx]
+                is_space = tok.text.isspace()
+                width = self._run_width(tok, style)
+                if not line and is_space:
+                    idx += 1
+                    continue
+                if line and line_w + width > max_rest and not is_space:
+                    break
+                line.append(tok)
+                line_w += width
+                idx += 1
+            if not line:
+                break
+            lines.append(line)
+            indents.append(prefix_width)
+        return lines, indents
 
 
 class LayoutEngine:
@@ -623,47 +840,55 @@ class LayoutEngine:
 
             if block.kind == "paragraph":
                 style = self.styles["body"]
-                lines = self.measure.wrap_text(block.text, style, CONTENT_WIDTH_PT)
-                h = self.measure.text_height(lines, style) + style.space_after
-                chunk: List[str] = []
-                for ln in lines:
-                    if y + style.leading > PAGE_HEIGHT_PT - PAGE_MARGIN_PT:
-                        if chunk:
-                            current.elements.append(TextElement(PAGE_MARGIN_PT, y - len(chunk) * style.leading, CONTENT_WIDTH_PT, chunk, style))
-                        pages.append(current)
-                        current = PageLayout(section="content")
-                        start_new_page("content")
-                        chunk = []
-                    if current.first_source_line is None:
-                        current.first_source_line = block.start_line
-                    chunk.append(ln)
-                    y += style.leading
-                if chunk:
-                    current.elements.append(TextElement(PAGE_MARGIN_PT, y - len(chunk) * style.leading, CONTENT_WIDTH_PT, chunk, style))
-                y += style.space_after
+                lines = self.measure.wrap_inline(self.measure.parse_inline(block.text), style, CONTENT_WIDTH_PT)
+                h = len(lines) * style.leading + style.space_after
+                ensure_space(h)
+                current.elements.append(RichTextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style, [0.0] * len(lines)))
+                if current.first_source_line is None:
+                    current.first_source_line = block.start_line
+                y += len(lines) * style.leading + style.space_after
                 mark_lines(block)
                 continue
 
             if block.kind == "list":
-                ordered = block.meta.get("ordered", False)
-                items = block.text.splitlines()
                 style = self.styles["list"]
-                page_idx = len(pages)
-                for idx, item in enumerate(items, start=1):
-                    bullet = f"{idx}. " if ordered else "• "
-                    wrapped = self.measure.wrap_text(bullet + item, style, CONTENT_WIDTH_PT)
-                    for line in wrapped:
-                        if y + style.leading > PAGE_HEIGHT_PT - PAGE_MARGIN_PT:
-                            pages.append(current)
-                            current = PageLayout(section="content")
-                            start_new_page("content")
-                            page_idx = len(pages)
-                        current.elements.append(TextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, [line], style))
-                        if current.first_source_line is None:
-                            current.first_source_line = block.start_line
-                        y += style.leading
-                    y += style.space_after
-                mark_lines(block, page_idx)
+                for item in block.meta.get("items", []):
+                    marker = item.marker if item.ordered else "•"
+                    base_x = PAGE_MARGIN_PT + item.level * 18.0
+                    max_w = max(40.0, CONTENT_WIDTH_PT - item.level * 18.0)
+                    lines, indents = self.measure.wrap_list_item(f"{marker} ", self.measure.parse_inline(item.text), style, max_w)
+                    h = len(lines) * style.leading + style.space_after
+                    ensure_space(h)
+                    current.elements.append(RichTextElement(base_x, y, max_w, lines, style, indents))
+                    if current.first_source_line is None:
+                        current.first_source_line = block.start_line
+                    y += len(lines) * style.leading + style.space_after
+                mark_lines(block)
+                continue
+
+            if block.kind == "image":
+                try:
+                    path = self.assets.resolve_image(block.meta["src"])
+                    with Image.open(path) as img:
+                        iw, ih = img.size
+                    max_w_px = pt_to_px(CONTENT_WIDTH_PT)
+                    max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
+                    scale = min(max_w_px / iw, max_h_px / ih, 1.0)
+                    w_pt = iw * scale / PREVIEW_DPI * 72.0
+                    h_pt = ih * scale / PREVIEW_DPI * 72.0
+                    ensure_space(h_pt + 8)
+                    x = PAGE_MARGIN_PT + (CONTENT_WIDTH_PT - w_pt) / 2
+                    current.elements.append(ImageElement(x, y, w_pt, h_pt, path))
+                    if current.first_source_line is None:
+                        current.first_source_line = block.start_line
+                    y += h_pt + 8
+                    mark_lines(block)
+                except Exception as exc:
+                    style = self.styles["code"]
+                    lines = self.measure.wrap_text(f"[image render error: {exc}]", style, CONTENT_WIDTH_PT)
+                    current.elements.append(TextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style))
+                    y += self.measure.text_height(lines, style) + 6
+                    warnings.append(str(exc))
                 continue
 
             if block.kind in {"code"}:
@@ -781,16 +1006,15 @@ class LayoutEngine:
             return style.space_before + self.measure.text_height(lines, style) + style.space_after
         if block.kind == "paragraph":
             style = self.styles["body"]
-            lines = self.measure.wrap_text(block.text, style, CONTENT_WIDTH_PT)
-            return self.measure.text_height(lines, style) + style.space_after
+            lines = self.measure.wrap_inline(self.measure.parse_inline(block.text), style, CONTENT_WIDTH_PT)
+            return len(lines) * style.leading + style.space_after
         if block.kind == "list":
             style = self.styles["list"]
             h = 0.0
-            items = block.text.splitlines()
-            for idx, item in enumerate(items, start=1):
-                bullet = f"{idx}. " if block.meta.get("ordered", False) else "• "
-                wrapped = self.measure.wrap_text(bullet + item, style, CONTENT_WIDTH_PT)
-                h += self.measure.text_height(wrapped, style) + style.space_after
+            for item in block.meta.get("items", []):
+                max_w = max(40.0, CONTENT_WIDTH_PT - item.level * 18.0)
+                lines, _ = self.measure.wrap_list_item(f"{item.marker if item.ordered else '•'} ", self.measure.parse_inline(item.text), style, max_w)
+                h += len(lines) * style.leading + style.space_after
             return h
         if block.kind == "code":
             style = self.styles["code"]
@@ -807,6 +1031,17 @@ class LayoutEngine:
                 scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
                 h_pt = ih * scale / self.assets.dpi * 72.0
                 return h_pt + 8
+            except Exception:
+                return 24.0
+        if block.kind == "image":
+            try:
+                path = self.assets.resolve_image(block.meta["src"])
+                with Image.open(path) as img:
+                    iw, ih = img.size
+                max_w_px = pt_to_px(CONTENT_WIDTH_PT)
+                max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
+                scale = min(max_w_px / iw, max_h_px / ih, 1.0)
+                return ih * scale / PREVIEW_DPI * 72.0 + 8
             except Exception:
                 return 24.0
         if block.kind == "table":
@@ -839,22 +1074,39 @@ class LayoutEngine:
                 y += self.measure.text_height(lines, style) + style.space_after
             elif inner.kind == "paragraph":
                 style = self.styles["body"]
-                lines = self.measure.wrap_text(inner.text, style, CONTENT_WIDTH_PT)
-                page.elements.append(TextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style))
-                y += self.measure.text_height(lines, style) + style.space_after
+                lines = self.measure.wrap_inline(self.measure.parse_inline(inner.text), style, CONTENT_WIDTH_PT)
+                page.elements.append(RichTextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style, [0.0] * len(lines)))
+                y += len(lines) * style.leading + style.space_after
             elif inner.kind == "list":
                 style = self.styles["list"]
-                items = inner.text.splitlines()
-                for idx, item in enumerate(items, start=1):
-                    bullet = f"{idx}. " if inner.meta.get("ordered", False) else "• "
-                    wrapped = self.measure.wrap_text(bullet + item, style, CONTENT_WIDTH_PT)
-                    page.elements.append(TextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, wrapped, style))
-                    y += self.measure.text_height(wrapped, style) + style.space_after
+                for item in inner.meta.get("items", []):
+                    max_w = max(40.0, CONTENT_WIDTH_PT - item.level * 18.0)
+                    lines, indents = self.measure.wrap_list_item(f"{item.marker if item.ordered else '•'} ", self.measure.parse_inline(item.text), style, max_w)
+                    page.elements.append(RichTextElement(PAGE_MARGIN_PT + item.level * 18.0, y, max_w, lines, style, indents))
+                    y += len(lines) * style.leading + style.space_after
             elif inner.kind == "code":
                 style = self.styles["code"]
                 lines = inner.text.splitlines() or [""]
                 page.elements.append(TextElement(PAGE_MARGIN_PT + 8, y + 8, CONTENT_WIDTH_PT - 16, [ln if ln else " " for ln in lines], style))
                 y += 8 + len(lines) * style.leading + 12
+            elif inner.kind == "image":
+                try:
+                    path = self.assets.resolve_image(inner.meta["src"])
+                    with Image.open(path) as img:
+                        iw, ih = img.size
+                    max_w_px = pt_to_px(CONTENT_WIDTH_PT)
+                    max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
+                    scale = min(max_w_px / iw, max_h_px / ih, 1.0)
+                    w_pt = iw * scale / PREVIEW_DPI * 72.0
+                    h_pt = ih * scale / PREVIEW_DPI * 72.0
+                    x = PAGE_MARGIN_PT + (CONTENT_WIDTH_PT - w_pt) / 2
+                    page.elements.append(ImageElement(x, y, w_pt, h_pt, path))
+                    y += h_pt + 8
+                except Exception as exc:
+                    style = self.styles["code"]
+                    lines = self.measure.wrap_text(f"[image render error: {exc}]", style, CONTENT_WIDTH_PT)
+                    page.elements.append(TextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style))
+                    y += self.measure.text_height(lines, style) + 6
             elif inner.kind in {"plantuml", "tex"}:
                 try:
                     path = self.assets.render_plantuml(inner.text) if inner.kind == "plantuml" else self.assets.render_tex(inner.text)
@@ -941,7 +1193,9 @@ class PageRenderer:
             img = Image.new("RGB", (PREVIEW_PAGE_WIDTH_PX, PREVIEW_PAGE_HEIGHT_PX), "white")
             draw = ImageDraw.Draw(img)
             for el in page.elements:
-                if isinstance(el, TextElement):
+                if isinstance(el, RichTextElement):
+                    self._draw_rich_text(draw, el)
+                elif isinstance(el, TextElement):
                     self._draw_text(draw, el)
                 elif isinstance(el, ImageElement):
                     self._draw_image(img, el)
@@ -962,7 +1216,7 @@ class PageRenderer:
         y = pt_to_px(el.y)
         width_px = pt_to_px(el.width)
         font_family = "mono" if el.style.font_name.startswith("DDMono") else "sans"
-        font = self.fonts.pil_font(font_family, pt_to_px(el.style.font_size), bold=el.style.bold)
+        font = self.fonts.pil_font(font_family, pt_to_px(el.style.font_size), bold=el.style.bold, italic=False)
         line_h = pt_to_px(el.style.leading)
         color = el.style.color
         for i, line in enumerate(el.lines):
@@ -971,6 +1225,24 @@ class PageRenderer:
                 bbox = draw.textbbox((0, 0), line, font=font)
                 tx = x + max(0, (width_px - (bbox[2] - bbox[0])) // 2)
             draw.text((tx, y + i * line_h), line, fill=color, font=font)
+
+    def _draw_rich_text(self, draw: ImageDraw.ImageDraw, el: RichTextElement) -> None:
+        x0 = pt_to_px(el.x)
+        y0 = pt_to_px(el.y)
+        line_h = pt_to_px(el.style.leading)
+        for i, line in enumerate(el.lines):
+            x = x0 + pt_to_px(el.line_indents[i] if i < len(el.line_indents) else 0.0)
+            for run in line:
+                family = "mono" if run.code else "sans"
+                font = self.fonts.pil_font(family, pt_to_px(el.style.font_size), bold=run.bold or el.style.bold, italic=run.italic)
+                color = (29, 78, 216) if run.link else el.style.color
+                draw.text((x, y0 + i * line_h), run.text, fill=color, font=font)
+                bbox = draw.textbbox((x, y0 + i * line_h), run.text, font=font)
+                width = bbox[2] - bbox[0]
+                if run.link:
+                    uy = y0 + i * line_h + line_h - 2
+                    draw.line((x, uy, x + width, uy), fill=color, width=1)
+                x += width
 
     def _draw_image(self, img: Image.Image, el: ImageElement) -> None:
         x = pt_to_px(el.x)
@@ -1047,7 +1319,9 @@ class PDFExporter:
         c = canvas.Canvas(buf, pagesize=A4, pageCompression=1)
         for page in layout.pages:
             for el in page.elements:
-                if isinstance(el, TextElement):
+                if isinstance(el, RichTextElement):
+                    self._draw_rich_text(c, el)
+                elif isinstance(el, TextElement):
                     self._draw_text(c, el)
                 elif isinstance(el, ImageElement):
                     self._draw_image(c, el)
@@ -1071,6 +1345,25 @@ class PDFExporter:
                 c.drawCentredString(el.x + el.width / 2, yy, line)
             else:
                 c.drawString(el.x, yy, line)
+
+    def _draw_rich_text(self, c: canvas.Canvas, el: RichTextElement) -> None:
+        for i, line in enumerate(el.lines):
+            x = el.x + (el.line_indents[i] if i < len(el.line_indents) else 0.0)
+            yy = PAGE_HEIGHT_PT - el.y - i * el.style.leading - el.style.font_size
+            for run in line:
+                family = "mono" if run.code else "sans"
+                font_name = self.fonts.reportlab_font_name(family, run.bold or el.style.bold, run.italic)
+                c.setFont(font_name, el.style.font_size)
+                if run.link:
+                    c.setFillColorRGB(29 / 255, 78 / 255, 216 / 255)
+                else:
+                    c.setFillColorRGB(*(v / 255 for v in el.style.color))
+                c.drawString(x, yy, run.text)
+                w = pdfmetrics.stringWidth(run.text, font_name, el.style.font_size)
+                if run.link:
+                    c.line(x, yy - 1, x + w, yy - 1)
+                    c.linkURL(run.link, (x, yy - 2, x + w, yy + el.style.leading), relative=0)
+                x += w
 
     def _draw_image(self, c: canvas.Canvas, el: ImageElement) -> None:
         c.drawImage(ImageReader(el.image_path), el.x, PAGE_HEIGHT_PT - el.y - el.height, width=el.width, height=el.height, preserveAspectRatio=True, mask='auto')
@@ -1125,9 +1418,9 @@ class PDFExporter:
 
 
 class DocumentRenderer:
-    def __init__(self, plantuml_cmd: str = "plantuml") -> None:
+    def __init__(self, plantuml_cmd: str = "plantuml", base_dir: Optional[str] = None) -> None:
         self.fonts = FontRegistry()
-        self.assets = AssetRenderer(plantuml_cmd=plantuml_cmd)
+        self.assets = AssetRenderer(plantuml_cmd=plantuml_cmd, base_dir=base_dir)
         self.layout_engine = LayoutEngine(self.fonts, self.assets)
         self.page_renderer = PageRenderer(self.fonts)
         self.pdf_exporter = PDFExporter(self.fonts)
@@ -1148,16 +1441,17 @@ if PYSIDE_AVAILABLE:
 
 
     class RenderJob(QRunnable):
-        def __init__(self, generation: int, text: str, plantuml_cmd: str) -> None:
+        def __init__(self, generation: int, text: str, plantuml_cmd: str, base_dir: str) -> None:
             super().__init__()
             self.generation = generation
             self.text = text
             self.plantuml_cmd = plantuml_cmd
+            self.base_dir = base_dir
             self.signals = RenderSignals()
 
         def run(self) -> None:
             try:
-                result = DocumentRenderer(self.plantuml_cmd).render(self.text)
+                result = DocumentRenderer(self.plantuml_cmd, self.base_dir).render(self.text)
                 self.signals.done.emit(self.generation, result)
             except Exception as exc:
                 self.signals.failed.emit(self.generation, str(exc))
@@ -1591,7 +1885,8 @@ if PYSIDE_AVAILABLE:
             gen = self.generation
             text = self.editor.toPlainText()
             self.status.setText("Rendering preview…")
-            job = RenderJob(gen, text, self.plantuml_cmd)
+            base_dir = str(Path(self.file_path).resolve().parent) if self.file_path else os.getcwd()
+            job = RenderJob(gen, text, self.plantuml_cmd, base_dir)
             job.signals.done.connect(self._render_done)
             job.signals.failed.connect(self._render_failed)
             self.thread_pool.start(job)
