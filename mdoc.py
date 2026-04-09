@@ -88,6 +88,20 @@ PAGEBREAK_RE = re.compile(r"^\s*<!--\s*pagebreak\s*-->\s*$")
 FENCE_RE = re.compile(r"^([`~]{3,})\s*([A-Za-z0-9_+#.-]*)\s*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$")
 LIST_ITEM_RE = re.compile(r"^(\s*)([-+*]|\d+\.|[A-Za-z]\.)\s+(.*)$")
+
+
+def list_indent_to_level(indent: str) -> int:
+    """Convert whitespace before a list marker into a nesting level.
+
+    MDoc should be forgiving here: people commonly indent nested list items
+    with 2, 3, or 4 spaces in lightweight notes. Tabs are expanded first,
+    then every 2 columns count as one nesting step.
+    """
+    cols = len(indent.expandtabs(4))
+    if cols < 2:
+        return 0
+    return cols // 2
+
 IMAGE_ONLY_RE = re.compile(r"^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$")
 INLINE_TOKEN_RE = re.compile(r"(!?\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
 
@@ -409,7 +423,7 @@ class BlockParser:
                     m_item = LIST_ITEM_RE.match(lines[i])
                     if m_item:
                         indent, marker, item_text = m_item.groups()
-                        level = max(0, len(indent.expandtabs(4)) // 4)
+                        level = list_indent_to_level(indent)
                         items.append(ListItemData(level=level, marker=marker, ordered=marker.endswith('.'), text=item_text.strip(), start_line=i + 1))
                         i += 1
                         continue
