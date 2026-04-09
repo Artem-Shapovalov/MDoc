@@ -1049,10 +1049,12 @@ class LayoutEngine:
                 part_rows: List[List[str]] = []
                 part_heights: List[float] = []
                 start_line = block.start_line
+                table_width = min(sum(col_widths), CONTENT_WIDTH_PT)
+                table_x = PAGE_MARGIN_PT + max(0.0, (CONTENT_WIDTH_PT - table_width) / 2.0)
                 for wrapped_row, row_h in body_layout:
                     if y + header_h + sum(part_heights) + row_h > PAGE_HEIGHT_PT - PAGE_MARGIN_PT:
                         if part_rows:
-                            current.elements.append(TablePartElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, header, part_rows, col_widths, part_heights, header_h, start_line))
+                            current.elements.append(TablePartElement(table_x, y, table_width, header, part_rows, col_widths, part_heights, header_h, start_line))
                             y += header_h + sum(part_heights) + 6
                             pages.append(current)
                             current = PageLayout(section="content")
@@ -1062,7 +1064,7 @@ class LayoutEngine:
                     part_rows.append(["\n".join(c) for c in wrapped_row])
                     part_heights.append(row_h)
                 if part_rows:
-                    current.elements.append(TablePartElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, header, part_rows, col_widths, part_heights, header_h, start_line))
+                    current.elements.append(TablePartElement(table_x, y, table_width, header, part_rows, col_widths, part_heights, header_h, start_line))
                     if current.first_source_line is None:
                         current.first_source_line = block.start_line
                     y += header_h + sum(part_heights) + 8
@@ -1251,7 +1253,9 @@ class LayoutEngine:
                 header_lines = ["\n".join(c) for c in header_wrapped]
                 rows_joined = [["\n".join(c) for c in wrapped] for wrapped, _ in body_layout]
                 part_heights = [h for _, h in body_layout]
-                elements.append(TablePartElement(x, y, width, header_lines, rows_joined, col_widths, part_heights, header_h, block.start_line))
+                table_width = min(sum(col_widths), width)
+                table_x = x + max(0.0, (width - table_width) / 2.0)
+                elements.append(TablePartElement(table_x, y, table_width, header_lines, rows_joined, col_widths, part_heights, header_h, block.start_line))
                 y += header_h + sum(part_heights) + 8
         return elements, max(0.0, y - start_y), warnings
 
