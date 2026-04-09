@@ -12,7 +12,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -113,7 +113,7 @@ def list_indent_to_level(indent: str) -> int:
 
 IMAGE_ONLY_RE = re.compile(r"^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$")
 QUOTE_PREFIX_RE = re.compile(r"^\s*(>\s*)+")
-INLINE_TOKEN_RE = re.compile(r"(!?\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
+INLINE_TOKEN_RE = re.compile(r"(!?\[[^\]]+\]\([^)]+\)|\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
 
 
 def pt_to_px(v: float) -> int:
@@ -376,9 +376,7 @@ class BlockParser:
                 title_lines = [f"# {mt.group(1).strip()}"]
                 i += 1
                 while i < len(lines):
-                    if TOC_LINE_RE.match(lines[i]):
-                        break
-                    if TITLE_LINE_RE.match(lines[i]):
+                    if re.match(r"^#\s+.+$", lines[i]):
                         break
                     title_lines.append(lines[i])
                     i += 1
@@ -435,11 +433,9 @@ class BlockParser:
                         if i < len(lines) and (QUOTE_PREFIX_RE.match(lines[i]) or not lines[i].strip()):
                             continue
                         break
-                    m_quote = QUOTE_PREFIX_RE.match(curr)
-                    if not m_quote:
+                    if not QUOTE_PREFIX_RE.match(curr):
                         break
-                    prefix = m_quote.group(0)
-                    rest = curr[m_quote.end():]
+                    rest = re.sub(r"^\s*>\s?", "", curr)
                     quote_lines.append(rest)
                     i += 1
                 blocks.append(Block("quote", start, i, text="\n".join(quote_lines)))
@@ -669,6 +665,8 @@ class Measure:
                     runs.append(InlineRun(mm.group(1), link=mm.group(2)))
                 else:
                     runs.append(InlineRun(tok))
+            elif tok.startswith('***') and tok.endswith('***'):
+                runs.append(InlineRun(tok[3:-3], bold=True, italic=True))
             elif tok.startswith('**') and tok.endswith('**'):
                 runs.append(InlineRun(tok[2:-2], bold=True))
             elif tok.startswith('*') and tok.endswith('*'):
@@ -903,6 +901,8 @@ class LayoutEngine:
 
             if block.kind == "heading":
                 style = self.styles[f"h{min(block.meta.get('level', 1),6)}"]
+                if block.meta.get("align") == "center":
+                    style = replace(style, align="center")
                 lines = self.measure.wrap_text(block.text, style, CONTENT_WIDTH_PT)
                 h = style.space_before + self.measure.text_height(lines, style) + style.space_after
                 ensure_space(h, keep_with_next=True)
@@ -1166,6 +1166,8 @@ class LayoutEngine:
         for block in blocks:
             if block.kind == "heading":
                 style = self.styles[f"h{min(block.meta.get('level', 1),6)}"]
+                if block.meta.get("align") == "center":
+                    style = replace(style, align="center")
                 lines = self.measure.wrap_text(block.text, style, width)
                 y += style.space_before
                 elements.append(TextElement(x, y, width, lines, style))
@@ -1257,6 +1259,8 @@ class LayoutEngine:
         page = PageLayout(section="title")
         page.first_source_line = block.start_line
         inner_blocks = BlockParser(enable_special_markers=False).parse(block.text)
+        if inner_blocks and inner_blocks[0].kind == "heading" and inner_blocks[0].meta.get("level") == 1:
+            inner_blocks[0].meta["align"] = "center"
         _, total_h, _ = self._layout_embedded_blocks(inner_blocks, PAGE_MARGIN_PT, PAGE_MARGIN_PT, CONTENT_WIDTH_PT)
         y = max(PAGE_MARGIN_PT, (PAGE_HEIGHT_PT - total_h) / 2.0)
         if total_h > CONTENT_HEIGHT_PT:
