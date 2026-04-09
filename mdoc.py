@@ -112,6 +112,7 @@ def list_indent_to_level(indent: str) -> int:
     return cols // 2
 
 IMAGE_ONLY_RE = re.compile(r"^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$")
+QUOTE_PREFIX_RE = re.compile(r"^\s*(>\s*)+")
 INLINE_TOKEN_RE = re.compile(r"(!?\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
 
 
@@ -142,6 +143,7 @@ class Style:
     align: str = "left"
     color: Tuple[int, int, int] = (0, 0, 0)
     bold: bool = False
+    background: Optional[Tuple[int, int, int]] = None
 
 
 @dataclass
@@ -191,6 +193,15 @@ class ImageElement:
 
 
 @dataclass
+class QuoteBoxElement:
+    x: float
+    y: float
+    width: float
+    height: float
+    level: int = 1
+
+
+@dataclass
 class TablePartElement:
     x: float
     y: float
@@ -214,7 +225,7 @@ class TOCEntryElement:
     page_number: int
 
 
-PageElement = RichTextElement | TextElement | ImageElement | TablePartElement | TOCEntryElement
+PageElement = RichTextElement | TextElement | ImageElement | QuoteBoxElement | TablePartElement | TOCEntryElement
 
 
 @dataclass
@@ -410,6 +421,28 @@ class BlockParser:
                     end = len(lines)
                 kind = {"plantuml": "plantuml", "puml": "plantuml", "tex": "tex"}.get(lang, "code")
                 blocks.append(Block(kind, start, end, text="\n".join(code_lines), meta={"lang": lang, "fence": fence}))
+                continue
+
+            if QUOTE_PREFIX_RE.match(line):
+                flush_paragraph(i)
+                start = i + 1
+                quote_lines = []
+                while i < len(lines):
+                    curr = lines[i]
+                    if not curr.strip():
+                        quote_lines.append("")
+                        i += 1
+                        if i < len(lines) and (QUOTE_PREFIX_RE.match(lines[i]) or not lines[i].strip()):
+                            continue
+                        break
+                    m_quote = QUOTE_PREFIX_RE.match(curr)
+                    if not m_quote:
+                        break
+                    prefix = m_quote.group(0)
+                    rest = curr[m_quote.end():]
+                    quote_lines.append(rest)
+                    i += 1
+                blocks.append(Block("quote", start, i, text="\n".join(quote_lines)))
                 continue
 
             heading = re.match(r"^(#{1,6})\s+(.*)$", line)
@@ -753,7 +786,11 @@ class LayoutEngine:
             "toc2": Style("DDSans", 11, 15, 0, 1),
             "toc3": Style("DDSans", 10.5, 14, 0, 1),
             "title": Style("DDSans-Bold", 28, 34, 0, 0, align="center", bold=True),
+            "quote": Style("DDSans", 11, 15, 0, 6),
         }
+        self.quote_padding_pt = 10.0
+        self.quote_bar_pt = 4.0
+        self.quote_gap_pt = 8.0
 
     def layout(self, blocks: List[Block]) -> LayoutResult:
         preliminary = [b for b in blocks if b.kind != "toc"]
@@ -907,6 +944,25 @@ class LayoutEngine:
                 mark_lines(block)
                 continue
 
+            if block.kind == "quote":
+                quote_x = PAGE_MARGIN_PT
+                quote_w = CONTENT_WIDTH_PT
+                inner_x = quote_x + self.quote_gap_pt + self.quote_bar_pt + self.quote_padding_pt
+                inner_w = max(60.0, quote_w - (self.quote_gap_pt + self.quote_bar_pt + self.quote_padding_pt) * 2)
+                inner_blocks = BlockParser(enable_special_markers=False).parse(block.text)
+                quote_elems, quote_h, quote_warn = self._layout_embedded_blocks(inner_blocks, inner_x, y + self.quote_padding_pt, inner_w)
+                outer_h = max(self.quote_padding_pt * 2 + quote_h, 28.0)
+                ensure_space(outer_h + 4)
+                quote_elems, quote_h, quote_warn = self._layout_embedded_blocks(inner_blocks, inner_x, y + self.quote_padding_pt, inner_w)
+                current.elements.append(QuoteBoxElement(quote_x, y, quote_w, outer_h, 1))
+                current.elements.extend(quote_elems)
+                warnings.extend(quote_warn)
+                if current.first_source_line is None:
+                    current.first_source_line = block.start_line
+                mark_lines(block)
+                y += outer_h + 4
+                continue
+
             if block.kind == "image":
                 try:
                     path = self.assets.resolve_image(block.meta["src"])
@@ -1057,6 +1113,11 @@ class LayoutEngine:
                 lines, _ = self.measure.wrap_list_item(f"{item.marker if item.ordered else '•'} ", self.measure.parse_inline(item.text), style, max_w)
                 h += len(lines) * style.leading + style.space_after
             return h
+        if block.kind == "quote":
+            inner_blocks = BlockParser(enable_special_markers=False).parse(block.text)
+            inner_w = max(60.0, CONTENT_WIDTH_PT - (self.quote_gap_pt + self.quote_bar_pt + self.quote_padding_pt) * 2)
+            _, inner_h, _ = self._layout_embedded_blocks(inner_blocks, PAGE_MARGIN_PT + self.quote_gap_pt + self.quote_bar_pt + self.quote_padding_pt, PAGE_MARGIN_PT + self.quote_padding_pt, inner_w)
+            return max(self.quote_padding_pt * 2 + inner_h, 28.0) + 4
         if block.kind == "code":
             style = self.styles["code"]
             lines = block.text.splitlines() or [""]
@@ -1098,90 +1159,110 @@ class LayoutEngine:
             return header_h + sum(h for _, h in body_layout) + 8
         return 0.0
 
-    def _layout_title_page(self, block: Block) -> PageLayout:
-        page = PageLayout(section="title")
-        page.first_source_line = block.start_line
-        inner_blocks = BlockParser(enable_special_markers=False).parse(block.text)
-        total_h = sum(self._measure_block_height(b) for b in inner_blocks)
-        y = max(PAGE_MARGIN_PT, (PAGE_HEIGHT_PT - total_h) / 2.0)
-        if total_h > CONTENT_HEIGHT_PT:
-            y = PAGE_MARGIN_PT
-        for inner in inner_blocks:
-            if inner.kind == "heading":
-                style = self.styles[f"h{min(inner.meta.get('level', 1),6)}"]
-                lines = self.measure.wrap_text(inner.text, style, CONTENT_WIDTH_PT)
+    def _layout_embedded_blocks(self, blocks: List[Block], x: float, y: float, width: float) -> Tuple[List[PageElement], float, List[str]]:
+        elements: List[PageElement] = []
+        warnings: List[str] = []
+        start_y = y
+        for block in blocks:
+            if block.kind == "heading":
+                style = self.styles[f"h{min(block.meta.get('level', 1),6)}"]
+                lines = self.measure.wrap_text(block.text, style, width)
                 y += style.space_before
-                page.elements.append(TextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style))
+                elements.append(TextElement(x, y, width, lines, style))
                 y += self.measure.text_height(lines, style) + style.space_after
-            elif inner.kind == "paragraph":
+            elif block.kind == "paragraph":
                 style = self.styles["body"]
-                lines = self.measure.wrap_inline(self.measure.parse_inline(inner.text), style, CONTENT_WIDTH_PT)
-                page.elements.append(RichTextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style, [0.0] * len(lines)))
+                lines = self.measure.wrap_inline(self.measure.parse_inline(block.text), style, width)
+                elements.append(RichTextElement(x, y, width, lines, style, [0.0] * len(lines)))
                 y += len(lines) * style.leading + style.space_after
-            elif inner.kind == "list":
+            elif block.kind == "list":
                 style = self.styles["list"]
-                for item in inner.meta.get("items", []):
-                    max_w = max(40.0, CONTENT_WIDTH_PT - item.level * 18.0)
+                for item in block.meta.get("items", []):
+                    max_w = max(40.0, width - item.level * 18.0)
                     lines, indents = self.measure.wrap_list_item(f"{item.marker if item.ordered else '•'} ", self.measure.parse_inline(item.text), style, max_w)
-                    page.elements.append(RichTextElement(PAGE_MARGIN_PT + item.level * 18.0, y, max_w, lines, style, indents))
+                    elements.append(RichTextElement(x + item.level * 18.0, y, max_w, lines, style, indents))
                     y += len(lines) * style.leading + style.space_after
-            elif inner.kind == "code":
+            elif block.kind == "quote":
+                inner_x = x + self.quote_gap_pt + self.quote_bar_pt + self.quote_padding_pt
+                inner_w = max(60.0, width - (self.quote_gap_pt + self.quote_bar_pt + self.quote_padding_pt) * 2)
+                inner_blocks = BlockParser(enable_special_markers=False).parse(block.text)
+                inner_elements, inner_h, inner_warn = self._layout_embedded_blocks(inner_blocks, inner_x, y + self.quote_padding_pt, inner_w)
+                outer_h = max(self.quote_padding_pt * 2 + inner_h, 28.0)
+                elements.append(QuoteBoxElement(x, y, width, outer_h, 1))
+                elements.extend(inner_elements)
+                warnings.extend(inner_warn)
+                y += outer_h + 4
+            elif block.kind == "code":
                 style = self.styles["code"]
-                lines = inner.text.splitlines() or [""]
-                page.elements.append(TextElement(PAGE_MARGIN_PT + 8, y + 8, CONTENT_WIDTH_PT - 16, [ln if ln else " " for ln in lines], style))
+                lines = block.text.splitlines() or [""]
+                elements.append(TextElement(x + 8, y + 8, width - 16, [ln if ln else " " for ln in lines], style))
                 y += 8 + len(lines) * style.leading + 12
-            elif inner.kind == "image":
+            elif block.kind == "image":
                 try:
-                    path = self.assets.resolve_image(inner.meta["src"])
+                    path = self.assets.resolve_image(block.meta["src"])
                     with Image.open(path) as img:
                         iw, ih = img.size
-                    max_w_px = pt_to_px(CONTENT_WIDTH_PT)
+                    max_w_px = pt_to_px(width)
                     max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
                     scale = min(max_w_px / iw, max_h_px / ih, 1.0)
                     w_pt = iw * scale / PREVIEW_DPI * 72.0
                     h_pt = ih * scale / PREVIEW_DPI * 72.0
-                    x = PAGE_MARGIN_PT + (CONTENT_WIDTH_PT - w_pt) / 2
-                    page.elements.append(ImageElement(x, y, w_pt, h_pt, path))
+                    img_x = x + (width - w_pt) / 2
+                    elements.append(ImageElement(img_x, y, w_pt, h_pt, path))
                     y += h_pt + 8
                 except Exception as exc:
                     style = self.styles["code"]
-                    lines = self.measure.wrap_text(f"[image render error: {exc}]", style, CONTENT_WIDTH_PT)
-                    page.elements.append(TextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style))
+                    lines = self.measure.wrap_text(f"[image render error: {exc}]", style, width)
+                    elements.append(TextElement(x, y, width, lines, style))
                     y += self.measure.text_height(lines, style) + 6
-            elif inner.kind in {"plantuml", "tex"}:
+                    warnings.append(str(exc))
+            elif block.kind in {"plantuml", "tex"}:
                 try:
-                    path = self.assets.render_plantuml(inner.text) if inner.kind == "plantuml" else self.assets.render_tex(inner.text)
+                    path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_tex(block.text)
                     with Image.open(path) as img:
                         iw, ih = img.size
-                    max_w_px = pt_to_px(CONTENT_WIDTH_PT)
+                    max_w_px = pt_to_px(width)
                     max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                    natural_scale = 2.0 if inner.kind == "plantuml" else 1.35
+                    natural_scale = 2.0 if block.kind == "plantuml" else 1.35
                     scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
                     w_pt = iw * scale / self.assets.dpi * 72.0
                     h_pt = ih * scale / self.assets.dpi * 72.0
-                    x = PAGE_MARGIN_PT + (CONTENT_WIDTH_PT - w_pt) / 2
-                    page.elements.append(ImageElement(x, y, w_pt, h_pt, path))
+                    img_x = x + (width - w_pt) / 2
+                    elements.append(ImageElement(img_x, y, w_pt, h_pt, path))
                     y += h_pt + 8
                 except Exception as exc:
                     style = self.styles["code"]
-                    lines = self.measure.wrap_text(f"[{inner.kind} render error: {exc}]", style, CONTENT_WIDTH_PT)
-                    page.elements.append(TextElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, lines, style))
+                    lines = self.measure.wrap_text(f"[{block.kind} render error: {exc}]", style, width)
+                    elements.append(TextElement(x, y, width, lines, style))
                     y += self.measure.text_height(lines, style) + 6
-            elif inner.kind == "table":
-                header, rows = self._parse_table(inner.text)
+                    warnings.append(str(exc))
+            elif block.kind == "table":
+                header, rows = self._parse_table(block.text)
                 col_count = max(len(header), max((len(r) for r in rows), default=0))
                 if not col_count:
                     continue
                 header += [""] * (col_count - len(header))
                 rows = [r + [""] * (col_count - len(r)) for r in rows]
-                col_widths = self._compute_table_widths(header, rows, col_count)
+                col_widths = self._compute_table_widths(header, rows, col_count, width)
                 header_wrapped, header_h = self._table_row_layout(header, col_widths, True)
                 body_layout = [self._table_row_layout(r, col_widths, False) for r in rows]
                 header_lines = ["\n".join(c) for c in header_wrapped]
                 rows_joined = [["\n".join(c) for c in wrapped] for wrapped, _ in body_layout]
                 part_heights = [h for _, h in body_layout]
-                page.elements.append(TablePartElement(PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT, header_lines, rows_joined, col_widths, part_heights, header_h, inner.start_line))
+                elements.append(TablePartElement(x, y, width, header_lines, rows_joined, col_widths, part_heights, header_h, block.start_line))
                 y += header_h + sum(part_heights) + 8
+        return elements, max(0.0, y - start_y), warnings
+
+    def _layout_title_page(self, block: Block) -> PageLayout:
+        page = PageLayout(section="title")
+        page.first_source_line = block.start_line
+        inner_blocks = BlockParser(enable_special_markers=False).parse(block.text)
+        _, total_h, _ = self._layout_embedded_blocks(inner_blocks, PAGE_MARGIN_PT, PAGE_MARGIN_PT, CONTENT_WIDTH_PT)
+        y = max(PAGE_MARGIN_PT, (PAGE_HEIGHT_PT - total_h) / 2.0)
+        if total_h > CONTENT_HEIGHT_PT:
+            y = PAGE_MARGIN_PT
+        elements, _, _ = self._layout_embedded_blocks(inner_blocks, PAGE_MARGIN_PT, y, CONTENT_WIDTH_PT)
+        page.elements.extend(elements)
         return page
 
     def _parse_table(self, text: str) -> Tuple[List[str], List[List[str]]]:
@@ -1199,18 +1280,18 @@ class LayoutEngine:
         body = [split(r) for r in rows[2:]]
         return header, body
 
-    def _compute_table_widths(self, header: List[str], rows: List[List[str]], col_count: int) -> List[float]:
+    def _compute_table_widths(self, header: List[str], rows: List[List[str]], col_count: int, available_width: float = CONTENT_WIDTH_PT) -> List[float]:
         min_w = 48.0
         desired = [min_w] * col_count
         style = self.styles["body"]
         for idx in range(col_count):
             items = [header[idx]] + [r[idx] for r in rows if idx < len(r)]
             longest = max((self.measure.pt_width(cell[:60], style.font_name, style.font_size) for cell in items), default=min_w)
-            desired[idx] = max(min_w, min(longest + 16, CONTENT_WIDTH_PT / 1.5))
+            desired[idx] = max(min_w, min(longest + 16, available_width / 1.5))
         total = sum(desired)
-        if total <= CONTENT_WIDTH_PT:
+        if total <= available_width:
             return desired
-        scale = CONTENT_WIDTH_PT / total
+        scale = available_width / total
         return [w * scale for w in desired]
 
     def _table_row_layout(self, row: List[str], col_widths: List[float], header: bool) -> Tuple[List[List[str]], float]:
@@ -1240,6 +1321,8 @@ class PageRenderer:
                     self._draw_text(draw, el)
                 elif isinstance(el, ImageElement):
                     self._draw_image(img, el)
+                elif isinstance(el, QuoteBoxElement):
+                    self._draw_quote_box(draw, el)
                 elif isinstance(el, TablePartElement):
                     self._draw_table(draw, el)
                 elif isinstance(el, TOCEntryElement):
@@ -1273,17 +1356,30 @@ class PageRenderer:
         line_h = pt_to_px(el.style.leading)
         for i, line in enumerate(el.lines):
             x = x0 + pt_to_px(el.line_indents[i] if i < len(el.line_indents) else 0.0)
+            baseline_y = y0 + i * line_h
             for run in line:
                 family = "mono" if run.code else "sans"
                 font = self.fonts.pil_font(family, pt_to_px(el.style.font_size), bold=run.bold or el.style.bold, italic=run.italic)
                 color = (29, 78, 216) if run.link else el.style.color
-                draw.text((x, y0 + i * line_h), run.text, fill=color, font=font)
-                bbox = draw.textbbox((x, y0 + i * line_h), run.text, font=font)
+                bbox = draw.textbbox((x, baseline_y), run.text, font=font)
                 width = bbox[2] - bbox[0]
+                if run.code and run.text.strip():
+                    pad_x = 2
+                    pad_y = 1
+                    draw.rounded_rectangle((x - pad_x, baseline_y - pad_y, x + width + pad_x, baseline_y + line_h - 1), radius=2, fill=(232, 232, 232))
+                draw.text((x, baseline_y), run.text, fill=color, font=font)
                 if run.link:
-                    uy = y0 + i * line_h + line_h - 2
+                    uy = baseline_y + line_h - 2
                     draw.line((x, uy, x + width, uy), fill=color, width=1)
                 x += width
+
+    def _draw_quote_box(self, draw: ImageDraw.ImageDraw, el: QuoteBoxElement) -> None:
+        x = pt_to_px(el.x)
+        y = pt_to_px(el.y)
+        w = pt_to_px(el.width)
+        h = pt_to_px(el.height)
+        draw.rectangle((x, y, x + w, y + h), fill=(242, 242, 242), outline=(210, 210, 210), width=1)
+        draw.rectangle((x, y, x + 5, y + h), fill=(0, 0, 0), outline=(0, 0, 0))
 
     def _draw_image(self, img: Image.Image, el: ImageElement) -> None:
         x = pt_to_px(el.x)
@@ -1366,6 +1462,8 @@ class PDFExporter:
                     self._draw_text(c, el)
                 elif isinstance(el, ImageElement):
                     self._draw_image(c, el)
+                elif isinstance(el, QuoteBoxElement):
+                    self._draw_quote_box(c, el)
                 elif isinstance(el, TablePartElement):
                     self._draw_table(c, el)
                 elif isinstance(el, TOCEntryElement):
@@ -1395,16 +1493,26 @@ class PDFExporter:
                 family = "mono" if run.code else "sans"
                 font_name = self.fonts.reportlab_font_name(family, run.bold or el.style.bold, run.italic)
                 c.setFont(font_name, el.style.font_size)
+                w = pdfmetrics.stringWidth(run.text, font_name, el.style.font_size)
+                if run.code and run.text.strip():
+                    c.setFillColorRGB(232 / 255, 232 / 255, 232 / 255)
+                    c.roundRect(x - 1.5, yy - 1.5, w + 3.0, el.style.leading, 2, fill=1, stroke=0)
                 if run.link:
                     c.setFillColorRGB(29 / 255, 78 / 255, 216 / 255)
                 else:
                     c.setFillColorRGB(*(v / 255 for v in el.style.color))
                 c.drawString(x, yy, run.text)
-                w = pdfmetrics.stringWidth(run.text, font_name, el.style.font_size)
                 if run.link:
                     c.line(x, yy - 1, x + w, yy - 1)
                     c.linkURL(run.link, (x, yy - 2, x + w, yy + el.style.leading), relative=0)
                 x += w
+
+    def _draw_quote_box(self, c: canvas.Canvas, el: QuoteBoxElement) -> None:
+        c.setStrokeColorRGB(210 / 255, 210 / 255, 210 / 255)
+        c.setFillColorRGB(242 / 255, 242 / 255, 242 / 255)
+        c.rect(el.x, PAGE_HEIGHT_PT - el.y - el.height, el.width, el.height, fill=1, stroke=1)
+        c.setFillColorRGB(0, 0, 0)
+        c.rect(el.x, PAGE_HEIGHT_PT - el.y - el.height, 5, el.height, fill=1, stroke=0)
 
     def _draw_image(self, c: canvas.Canvas, el: ImageElement) -> None:
         c.drawImage(ImageReader(el.image_path), el.x, PAGE_HEIGHT_PT - el.y - el.height, width=el.width, height=el.height, preserveAspectRatio=True, mask='auto')
