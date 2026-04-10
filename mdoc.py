@@ -91,6 +91,67 @@ PREVIEW_ZOOM_MAX = 4.00
 PREVIEW_ZOOM_STEP = 1.12
 EDITOR_SYNC_GUARD_MS = 120
 
+
+def app_root_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        exe_path = Path(sys.executable).resolve()
+        if sys.platform == "darwin" and exe_path.parent.name == "MacOS":
+            return exe_path.parent.parent.parent
+        return exe_path.parent
+    return Path(__file__).resolve().parent
+
+
+def runtime_dir() -> Optional[Path]:
+    root = app_root_dir()
+    candidates = []
+    if sys.platform == "darwin":
+        candidates.append(root / "Contents" / "Resources" / "runtime")
+    candidates.append(root / "runtime")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def prepend_env_path(name: str, path: Path) -> None:
+    current = os.environ.get(name, "")
+    parts = [str(path)]
+    if current:
+        parts.append(current)
+    os.environ[name] = os.pathsep.join(parts)
+
+
+def bundled_plantuml_cmd() -> Optional[str]:
+    rt = runtime_dir()
+    if not rt:
+        return None
+    plantuml_jar = rt / "plantuml" / "plantuml.jar"
+    if not plantuml_jar.exists():
+        return None
+    java_bin = rt / "java" / "bin" / ("java.exe" if os.name == "nt" else "java")
+    if java_bin.exists():
+        return f'"{java_bin}" -jar "{plantuml_jar}"'
+    return f'java -jar "{plantuml_jar}"'
+
+
+def bootstrap_runtime_environment() -> None:
+    rt = runtime_dir()
+    if not rt:
+        return
+    graphviz_bin = rt / "graphviz" / "bin"
+    if graphviz_bin.exists():
+        prepend_env_path("PATH", graphviz_bin)
+        dot_name = "dot.exe" if os.name == "nt" else "dot"
+        dot_path = graphviz_bin / dot_name
+        if dot_path.exists():
+            os.environ.setdefault("GRAPHVIZ_DOT", str(dot_path))
+    java_bin_dir = rt / "java" / "bin"
+    if java_bin_dir.exists():
+        prepend_env_path("PATH", java_bin_dir)
+
+
+bootstrap_runtime_environment()
+
 TITLE_LINE_RE = re.compile(r"^\s*#\s+Title:\s*(.+?)\s*$")
 TOC_LINE_RE = re.compile(r"^\s*#\s+TOC\s*$")
 PAGEBREAK_RE = re.compile(r"^\s*<!--\s*pagebreak\s*-->\s*$")
@@ -258,32 +319,38 @@ class RenderError(RuntimeError):
 
 class FontRegistry:
     def __init__(self) -> None:
-        self.sans_path = self._find_font([
+        self.sans_path = self._find_font_candidates([
+            "DejaVuSans.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         ])
-        self.sans_bold_path = self._find_font([
+        self.sans_bold_path = self._find_font_candidates([
+            "DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
         ])
-        self.sans_italic_path = self._find_font([
+        self.sans_italic_path = self._find_font_candidates([
+            "DejaVuSans-Oblique.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
             "/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans-Oblique.ttf",
         ])
-        self.sans_bold_italic_path = self._find_font([
+        self.sans_bold_italic_path = self._find_font_candidates([
+            "DejaVuSans-BoldOblique.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
             "/usr/share/fonts/TTF/DejaVuSans-BoldOblique.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans-BoldOblique.ttf",
         ])
-        self.mono_path = self._find_font([
+        self.mono_path = self._find_font_candidates([
+            "DejaVuSansMono.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
             "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
             "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
         ])
-        self.mono_bold_path = self._find_font([
+        self.mono_bold_path = self._find_font_candidates([
+            "DejaVuSansMono-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
             "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
             "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
@@ -299,6 +366,20 @@ class FontRegistry:
             if os.path.exists(path):
                 return path
         return None
+
+    @staticmethod
+    def _find_font_candidates(candidates: Sequence[str]) -> Optional[str]:
+        rt = runtime_dir()
+        expanded: List[str] = []
+        if rt:
+            fonts_root = rt / "fonts"
+            for name in candidates:
+                if os.path.isabs(name):
+                    expanded.append(name)
+                else:
+                    expanded.append(str(fonts_root / name))
+        expanded.extend(candidates)
+        return FontRegistry._find_font(expanded)
 
     def ensure_reportlab(self) -> None:
         if self._registered:
@@ -2205,7 +2286,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("markdown", nargs="?", help="Markdown file to open or export")
     p.add_argument("-o", "--output", help="Output PDF path for --export-pdf")
     p.add_argument("--export-pdf", action="store_true", help="Export the selected Markdown file to PDF without starting the GUI")
-    p.add_argument("--plantuml-cmd", default="plantuml", help="PlantUML executable command")
+    p.add_argument("--plantuml-cmd", default=bundled_plantuml_cmd() or "plantuml", help="PlantUML executable command")
     return p
 
 

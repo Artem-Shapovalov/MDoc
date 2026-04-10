@@ -96,9 +96,28 @@ sudo pacman -Syu --needed \
 # Build and run
 
 Use the following scripts:
-- build.sh makes deployable single-file executable
-- run.sh just runst the current project code
-- install.sh builds the application and copies it to /usr/bin
+- build.sh makes a deployable **single-directory** PyInstaller bundle in `dist/MDoc`
+- run.sh runs the current project code from the repo checkout
+- install.sh builds the bundle and installs it into `/opt/MDoc`, with a `mdoc` symlink in `/usr/local/bin`
+
+## Bundled release targets
+
+GitHub Actions now builds these release archives:
+
+- MDoc_win_x86_64
+- MDoc_win_arm
+- MDoc_lin_x86_64
+- MDoc_lin_arm
+- MDoc_mac_x86_64
+- MDoc_mac_m2
+
+Each release bundle is produced in **one-directory** form, not as a PyInstaller one-file executable. The runtime bundle includes:
+
+- Python runtime via PyInstaller
+- PlantUML jar downloaded during the build
+- Graphviz copied into the bundle during the build
+- Java runtime copied into the bundle during the build
+- DejaVu fonts downloaded during the build
 
 # Features overview
 

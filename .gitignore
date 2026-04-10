@@ -2,4 +2,12 @@
 dist
 build
 __pycache__
-mdoc.spec
+.venv/
+build/
+dist/
+__pycache__/
+third_party/
+*.zip
+*.tar.gz
+*.patch
+*.zip
