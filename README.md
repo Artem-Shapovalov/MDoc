@@ -180,3 +180,4 @@ mdoc --export-pdf path/to/document.md -o output.pdf
 ```
 
 If no output path is given, the PDF is written next to the input file with the `.pdf` extension.
+
