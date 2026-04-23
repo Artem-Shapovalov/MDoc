@@ -24,6 +24,7 @@ tar -xjf "${TMP_FONT_ARCHIVE}" -C "${TMP_FONT_DIR}"
 find "${TMP_FONT_DIR}" -maxdepth 2 -type f \( -name 'DejaVuSans*.ttf' -o -name 'DejaVuSansMono*.ttf' \) -exec cp {} "${ROOT_DIR}/third_party/fonts/" \;
 
 pyinstaller --noconfirm --clean "${ROOT_DIR}/mdoc.spec"
+python "${ROOT_DIR}/scripts/ci/prune_bundle.py"
 GRAPHVIZ_DOT="$(command -v dot)" JAVA_BIN="$(command -v java)" python "${ROOT_DIR}/scripts/ci/postbuild_bundle.py"
 
 echo "Built bundle: ${ROOT_DIR}/dist/MDoc"

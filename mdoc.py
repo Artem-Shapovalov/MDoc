@@ -138,13 +138,26 @@ def bootstrap_runtime_environment() -> None:
     rt = runtime_dir()
     if not rt:
         return
-    graphviz_bin = rt / "graphviz" / "bin"
+    graphviz_root = rt / "graphviz"
+    graphviz_bin = graphviz_root / "bin"
+    graphviz_lib = graphviz_root / "lib"
     if graphviz_bin.exists():
         prepend_env_path("PATH", graphviz_bin)
         dot_name = "dot.exe" if os.name == "nt" else "dot"
         dot_path = graphviz_bin / dot_name
         if dot_path.exists():
             os.environ.setdefault("GRAPHVIZ_DOT", str(dot_path))
+    if graphviz_lib.exists():
+        prepend_env_path("PATH", graphviz_lib)
+        os.environ.setdefault("GVBINDIR", str(graphviz_bin))
+        for name in ("GV_PLUGIN_PATH", "GRAPHVIZ_PLUGIN_PATH"):
+            os.environ.setdefault(name, str(graphviz_lib / "graphviz"))
+        if sys.platform == "darwin":
+            existing = os.environ.get("DYLD_LIBRARY_PATH", "")
+            os.environ["DYLD_LIBRARY_PATH"] = str(graphviz_lib) + (os.pathsep + existing if existing else "")
+        elif os.name != "nt":
+            existing = os.environ.get("LD_LIBRARY_PATH", "")
+            os.environ["LD_LIBRARY_PATH"] = str(graphviz_lib) + (os.pathsep + existing if existing else "")
     java_bin_dir = rt / "java" / "bin"
     if java_bin_dir.exists():
         prepend_env_path("PATH", java_bin_dir)
@@ -155,7 +168,7 @@ bootstrap_runtime_environment()
 TITLE_LINE_RE = re.compile(r"^\s*#\s+Title:\s*(.+?)\s*$")
 TOC_LINE_RE = re.compile(r"^\s*#\s+TOC\s*$")
 PAGEBREAK_RE = re.compile(r"^\s*<!--\s*pagebreak\s*-->\s*$")
-FENCE_RE = re.compile(r"^([`~]{3,})\s*([A-Za-z0-9_+#.-]*)\s*(.*?)\s*$")
+FENCE_RE = re.compile(r"^([`~]{3,})\s*([A-Za-z0-9_+#.-]*)\s*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$")
 LIST_ITEM_RE = re.compile(r"^(\s*)([-+*]|\d+\.|[A-Za-z]\.)\s+(.*)$")
 
@@ -176,19 +189,6 @@ IMAGE_ONLY_RE = re.compile(r"^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$")
 QUOTE_PREFIX_RE = re.compile(r"^\s*(>\s*)+")
 INLINE_TOKEN_RE = re.compile(r"(!?\[[^\]]+\]\([^)]+\)|\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
 
-GRAPHVIZ_LANGS = {"graphviz", "dot", "gv"}
-# Default display-scale coefficients applied to rendered diagram images before
-# page-fit clamping. Tweak these in one place to adjust the global visual size
-# of each renderer kind.
-DEFAULT_RENDERED_IMAGE_SCALE = {"plantuml": 3, "graphviz": 2, "tex": 1}
-
-GRAPHVIZ_WORDS = {
-    "digraph", "graph", "subgraph", "strict", "node", "edge", "label", "rankdir", "shape", "style",
-    "color", "fillcolor", "fontname", "fontsize", "penwidth", "arrowhead", "arrowtail", "headlabel",
-    "taillabel", "xlabel", "cluster", "record", "box", "ellipse", "diamond", "plaintext", "rounded",
-    "filled", "dashed", "solid", "bold", "invis", "rank", "same", "min", "max", "TB", "BT", "LR", "RL",
-}
-
 
 def pt_to_px(v: float) -> int:
     return max(1, int(round(v / 72.0 * PREVIEW_DPI)))
@@ -196,54 +196,6 @@ def pt_to_px(v: float) -> int:
 
 def html_unescape_minimal(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">" ).replace("&amp;", "&")
-
-
-def parse_fence_meta(raw: str) -> dict:
-    meta: dict = {}
-    if not raw:
-        return meta
-    for m in re.finditer(r"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s]+)", raw):
-        key = m.group(1).lower()
-        value = m.group(2).strip()
-        if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {'"', "'"}:
-            value = value[1:-1]
-        meta[key] = value
-    return meta
-
-
-def block_scale_multiplier(block: "Block") -> float:
-    raw = str(block.meta.get("scale", "")).strip()
-    if not raw:
-        return 1.0
-    try:
-        value = float(raw)
-    except ValueError:
-        return 1.0
-    if value <= 0:
-        return 1.0
-    return value
-
-
-def rendered_image_scale(block: "Block") -> float:
-    base = DEFAULT_RENDERED_IMAGE_SCALE.get(block.kind, 1.0)
-    return base * block_scale_multiplier(block)
-
-
-def fit_rendered_image(iw: int, ih: int, dpi: int, max_width_pt: float, max_height_pt: float, requested_scale: float) -> Tuple[float, float]:
-    """Scale a rendered image, then clamp it proportionally to the available area."""
-    if iw <= 0 or ih <= 0 or dpi <= 0:
-        return 0.0, 0.0
-
-    req_scale = requested_scale if requested_scale > 0 else 1.0
-    width_pt = iw * req_scale / dpi * 72.0
-    height_pt = ih * req_scale / dpi * 72.0
-
-    fit_ratio = min(
-        max_width_pt / width_pt if width_pt > 0 else 1.0,
-        max_height_pt / height_pt if height_pt > 0 else 1.0,
-        1.0,
-    )
-    return width_pt * fit_ratio, height_pt * fit_ratio
 
 
 @dataclass
@@ -543,7 +495,6 @@ class BlockParser:
                 flush_paragraph(i)
                 fence = m_fence.group(1)
                 lang = (m_fence.group(2) or "").strip().lower()
-                fence_meta = parse_fence_meta((m_fence.group(3) or "").strip())
                 start = i + 1
                 i += 1
                 code_lines: List[str] = []
@@ -560,9 +511,8 @@ class BlockParser:
                     i += 1
                 else:
                     end = len(lines)
-                kind = {"plantuml": "plantuml", "puml": "plantuml", "tex": "tex", "graphviz": "graphviz", "dot": "graphviz", "gv": "graphviz"}.get(lang, "code")
-                meta = {"lang": lang, "fence": fence, **fence_meta}
-                blocks.append(Block(kind, start, end, text="\n".join(code_lines), meta=meta))
+                kind = {"plantuml": "plantuml", "puml": "plantuml", "tex": "tex"}.get(lang, "code")
+                blocks.append(Block(kind, start, end, text="\n".join(code_lines), meta={"lang": lang, "fence": fence}))
                 continue
 
             if QUOTE_PREFIX_RE.match(line):
@@ -684,26 +634,6 @@ class AssetRenderer:
             if not png.exists():
                 raise RenderError("PlantUML did not produce a PNG file.")
             Image.open(png).save(out)
-        return str(out)
-
-    def render_graphviz(self, source: str) -> str:
-        out = self.cache.path_for("graphviz", source)
-        if out.exists():
-            return str(out)
-        with tempfile.TemporaryDirectory(prefix="md_doc_studio_dot_") as td:
-            src = Path(td) / "diagram.dot"
-            src.write_text(source, encoding="utf-8")
-            graphviz_dot = os.environ.get("GRAPHVIZ_DOT", "dot")
-            cmd = [graphviz_dot, "-Tpng", "-o", str(out), str(src)]
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            except FileNotFoundError as exc:
-                raise RenderError("Graphviz dot executable was not found.") from exc
-            if proc.returncode != 0:
-                raise RenderError(proc.stderr.strip() or proc.stdout.strip() or "Graphviz render failed")
-            if not out.exists():
-                raise RenderError("Graphviz did not produce a PNG file.")
-            Image.open(out).save(out)
         return str(out)
 
     def render_tex(self, source: str) -> str:
@@ -1167,18 +1097,17 @@ class LayoutEngine:
                 mark_lines(block)
                 continue
 
-            if block.kind in {"plantuml", "graphviz", "tex"}:
+            if block.kind in {"plantuml", "tex"}:
                 try:
-                    path = (
-                        self.assets.render_plantuml(block.text) if block.kind == "plantuml"
-                        else self.assets.render_graphviz(block.text) if block.kind == "graphviz"
-                        else self.assets.render_tex(block.text)
-                    )
+                    path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_tex(block.text)
                     with Image.open(path) as img:
                         iw, ih = img.size
-                    w_pt, h_pt = fit_rendered_image(
-                        iw, ih, self.assets.dpi, CONTENT_WIDTH_PT, CONTENT_HEIGHT_PT, rendered_image_scale(block)
-                    )
+                    max_w_px = pt_to_px(CONTENT_WIDTH_PT)
+                    max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
+                    natural_scale = 2.0 if block.kind == "plantuml" else 1.35
+                    scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
+                    w_pt = iw * scale / self.assets.dpi * 72.0
+                    h_pt = ih * scale / self.assets.dpi * 72.0
                     ensure_space(h_pt + 8)
                     x = PAGE_MARGIN_PT + (CONTENT_WIDTH_PT - w_pt) / 2
                     current.elements.append(ImageElement(x, y, w_pt, h_pt, path))
@@ -1289,18 +1218,16 @@ class LayoutEngine:
             style = self.styles["code"]
             lines = block.text.splitlines() or [""]
             return 8 + len(lines) * style.leading + 12
-        if block.kind in {"plantuml", "graphviz", "tex"}:
+        if block.kind in {"plantuml", "tex"}:
             try:
-                path = (
-                    self.assets.render_plantuml(block.text) if block.kind == "plantuml"
-                    else self.assets.render_graphviz(block.text) if block.kind == "graphviz"
-                    else self.assets.render_tex(block.text)
-                )
+                path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_tex(block.text)
                 with Image.open(path) as img:
                     iw, ih = img.size
-                _, h_pt = fit_rendered_image(
-                    iw, ih, self.assets.dpi, CONTENT_WIDTH_PT, CONTENT_HEIGHT_PT, rendered_image_scale(block)
-                )
+                max_w_px = pt_to_px(CONTENT_WIDTH_PT)
+                max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
+                natural_scale = 2.0 if block.kind == "plantuml" else 1.35
+                scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
+                h_pt = ih * scale / self.assets.dpi * 72.0
                 return h_pt + 8
             except Exception:
                 return 24.0
@@ -1387,18 +1314,17 @@ class LayoutEngine:
                     elements.append(TextElement(x, y, width, lines, style))
                     y += self.measure.text_height(lines, style) + 6
                     warnings.append(str(exc))
-            elif block.kind in {"plantuml", "graphviz", "tex"}:
+            elif block.kind in {"plantuml", "tex"}:
                 try:
-                    path = (
-                        self.assets.render_plantuml(block.text) if block.kind == "plantuml"
-                        else self.assets.render_graphviz(block.text) if block.kind == "graphviz"
-                        else self.assets.render_tex(block.text)
-                    )
+                    path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_tex(block.text)
                     with Image.open(path) as img:
                         iw, ih = img.size
-                    w_pt, h_pt = fit_rendered_image(
-                        iw, ih, self.assets.dpi, width, CONTENT_HEIGHT_PT, rendered_image_scale(block)
-                    )
+                    max_w_px = pt_to_px(width)
+                    max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
+                    natural_scale = 2.0 if block.kind == "plantuml" else 1.35
+                    scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
+                    w_pt = iw * scale / self.assets.dpi * 72.0
+                    h_pt = ih * scale / self.assets.dpi * 72.0
                     img_x = x + (width - w_pt) / 2
                     elements.append(ImageElement(img_x, y, w_pt, h_pt, path))
                     y += h_pt + 8
@@ -1802,7 +1728,6 @@ if PYSIDE_AVAILABLE:
                 self.formats[name] = fmt
             self.lexers = {"python": PythonLexer(), "py": PythonLexer(), "c": CLexer(), "cpp": CppLexer(), "c++": CppLexer(), "h": CppLexer(), "hpp": CppLexer(), "java": JavaLexer(), "tex": TexLexer()}
             self.puml_words = {"@startuml", "@enduml", "participant", "actor", "component", "database", "package", "note", "skinparam", "rectangle"}
-            self.graphviz_words = GRAPHVIZ_WORDS
 
         def _prev_block_info(self) -> Tuple[bool, str, str]:
             prev = self.currentBlock().previous()
@@ -1872,17 +1797,6 @@ if PYSIDE_AVAILABLE:
                 for m in re.finditer(r"\S+", text):
                     if m.group(0) in self.puml_words:
                         self.setFormat(m.start(), len(m.group(0)), self.formats["kw"])
-                return
-            if lang in GRAPHVIZ_LANGS:
-                for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", text):
-                    if m.group(0) in self.graphviz_words:
-                        self.setFormat(m.start(), len(m.group(0)), self.formats["kw"])
-                for m in re.finditer(r'"[^"\\]*(?:\\.[^"\\]*)*"', text):
-                    self.setFormat(m.start(), len(m.group(0)), self.formats["string"])
-                for m in re.finditer(r"//.*$", text):
-                    self.setFormat(m.start(), len(m.group(0)), self.formats["comment"])
-                for m in re.finditer(r"/\*.*?\*/", text):
-                    self.setFormat(m.start(), len(m.group(0)), self.formats["comment"])
 
 
     class LineNumberArea(QWidget):
@@ -1899,11 +1813,8 @@ if PYSIDE_AVAILABLE:
 
     def completions_for_lang(lang: str) -> List[str]:
         return {
-            "plantuml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle", "scale=1.2"],
-            "puml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle", "scale=1.2"],
-            "graphviz": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--", "scale=1.2"],
-            "dot": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--", "scale=1.2"],
-            "gv": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--", "scale=1.2"],
+            "plantuml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle"],
+            "puml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle"],
             "tex": ["\\frac{}{}", "\\sqrt{}", "\\sum_{i=1}^{n}", "\\int_{a}^{b}", "\\alpha", "\\beta", "\\gamma", "\\begin{bmatrix}", "\\end{bmatrix}"],
             "python": ["def", "class", "import", "from", "if", "elif", "else", "for", "while", "return", "with"],
             "py": ["def", "class", "import", "from", "if", "elif", "else", "for", "while", "return", "with"],

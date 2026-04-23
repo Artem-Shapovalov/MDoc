@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,6 +10,15 @@ ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "dist"
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
+JAVA_MODULES = [
+    "java.base",
+    "java.datatransfer",
+    "java.desktop",
+    "java.logging",
+    "java.naming",
+    "java.prefs",
+    "java.xml",
+]
 
 
 def bundle_root() -> Path:
@@ -57,56 +67,83 @@ def copy_fonts(runtime_root: Path) -> None:
     copy_tree(fonts_root, runtime_root / "fonts")
 
 
+def _copy_graphviz_libs(src_dir: Path, dst_dir: Path) -> None:
+    patterns = [
+        "libgvc*", "libcgraph*", "libcdt*", "libpathplan*", "libxdot*", "libexpat*",
+        "gvc*.dll", "cgraph*.dll", "cdt*.dll", "pathplan*.dll", "xdot*.dll", "expat*.dll",
+        "zlib*.dll", "libiconv*.dll",
+    ]
+    for pattern in patterns:
+        for src in src_dir.glob(pattern):
+            if src.is_file():
+                copy_file(src, dst_dir / src.name)
+
+
 def copy_graphviz(runtime_root: Path) -> None:
-    dot = env_path("GRAPHVIZ_DOT")
+    dot = env_path("GRAPHVIZ_DOT").resolve()
     target = runtime_root / "graphviz"
-
-    if IS_WIN or IS_MAC:
-        copy_tree(dot.parent.parent, target)
-        return
-
     bin_dir = ensure_dir(target / "bin")
     lib_dir = ensure_dir(target / "lib")
-    copy_file(dot, bin_dir / "dot")
+    copy_file(dot, bin_dir / dot.name)
 
-    plugin_dirs = [
-        Path("/usr/lib/graphviz"),
-        Path("/usr/lib64/graphviz"),
-        Path("/usr/lib/x86_64-linux-gnu/graphviz"),
-        Path("/usr/lib/aarch64-linux-gnu/graphviz"),
-    ]
-    lib_dirs = [
+    if IS_WIN:
+        root = dot.parent.parent
+        _copy_graphviz_libs(dot.parent, bin_dir)
+        if (dot.parent / "config6").exists():
+            copy_file(dot.parent / "config6", bin_dir / "config6")
+        if (root / "lib" / "graphviz").exists():
+            copy_tree(root / "lib" / "graphviz", target / "lib" / "graphviz")
+        return
+
+    if IS_MAC:
+        root = dot.parents[1]
+        _copy_graphviz_libs(root / "lib", lib_dir)
+        if (root / "lib" / "graphviz").exists():
+            copy_tree(root / "lib" / "graphviz", target / "lib" / "graphviz")
+        return
+
+    _copy_graphviz_libs(Path("/usr/lib"), lib_dir)
+    for lib_dir_path in (
         Path("/usr/lib"),
         Path("/usr/lib64"),
         Path("/lib/x86_64-linux-gnu"),
         Path("/lib/aarch64-linux-gnu"),
         Path("/usr/lib/x86_64-linux-gnu"),
         Path("/usr/lib/aarch64-linux-gnu"),
-    ]
-
-    for plugin_dir in plugin_dirs:
+    ):
+        if lib_dir_path.exists():
+            _copy_graphviz_libs(lib_dir_path, lib_dir)
+    for plugin_dir in (
+        Path("/usr/lib/graphviz"),
+        Path("/usr/lib64/graphviz"),
+        Path("/usr/lib/x86_64-linux-gnu/graphviz"),
+        Path("/usr/lib/aarch64-linux-gnu/graphviz"),
+    ):
         if plugin_dir.exists():
             copy_tree(plugin_dir, target / "lib" / "graphviz")
             break
 
-    for lib_dir_path in lib_dirs:
-        if not lib_dir_path.exists():
-            continue
-        for pattern in ("libgvc*", "libcgraph*", "libcdt*", "libpathplan*", "libxdot*", "libexpat*"):
-            for src in lib_dir_path.glob(pattern):
-                if src.is_file():
-                    copy_file(src, lib_dir / src.name)
-
 
 def copy_java(runtime_root: Path) -> None:
-    java_bin = env_path("JAVA_BIN")
-    if IS_WIN:
-        java_home = java_bin.parent.parent
-    elif IS_MAC:
-        java_home = java_bin.resolve().parents[2]
-    else:
-        java_home = java_bin.resolve().parents[1]
-    copy_tree(java_home, runtime_root / "java")
+    java_bin = env_path("JAVA_BIN").resolve()
+    java_home = java_bin.parent.parent if IS_WIN else java_bin.parents[1]
+    jlink = java_home / "bin" / ("jlink.exe" if IS_WIN else "jlink")
+    target = runtime_root / "java"
+    if target.exists():
+        shutil.rmtree(target)
+    if jlink.exists():
+        cmd = [
+            str(jlink),
+            "--add-modules", ",".join(JAVA_MODULES),
+            "--strip-debug",
+            "--no-header-files",
+            "--no-man-pages",
+            "--compress=2",
+            "--output", str(target),
+        ]
+        subprocess.run(cmd, check=True)
+        return
+    copy_tree(java_home, target)
 
 
 def main() -> None:
