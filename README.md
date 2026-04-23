@@ -22,6 +22,7 @@ SOFTWARE.
 # Features
 
 - PlantUML code blocks to render UML diagrams
+- Raw Graphviz/DOT code blocks to render function-block diagrams
 - TeX code blocks to render formulas
 - Title page and Table of Context based on headings
 - Page breaks
@@ -159,6 +160,22 @@ Alice -> Bob: Hello
 @enduml
 ```
 ````
+
+While editing inside the block press [Ctrl] + [Space] to complete.
+
+## Graphviz / DOT
+
+````markdown
+```graphviz
+digraph G {
+    rankdir=LR
+    node [shape=box, style=rounded]
+    Input -> Filter -> Output
+}
+```
+````
+
+Aliases: `dot`, `gv`.
 
 While editing inside the block press [Ctrl] + [Space] to complete.
 
