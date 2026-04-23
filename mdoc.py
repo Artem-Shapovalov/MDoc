@@ -155,7 +155,7 @@ bootstrap_runtime_environment()
 TITLE_LINE_RE = re.compile(r"^\s*#\s+Title:\s*(.+?)\s*$")
 TOC_LINE_RE = re.compile(r"^\s*#\s+TOC\s*$")
 PAGEBREAK_RE = re.compile(r"^\s*<!--\s*pagebreak\s*-->\s*$")
-FENCE_RE = re.compile(r"^([`~]{3,})\s*([A-Za-z0-9_+#.-]*)\s*$")
+FENCE_RE = re.compile(r"^([`~]{3,})\s*([A-Za-z0-9_+#.-]*)\s*(.*?)\s*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$")
 LIST_ITEM_RE = re.compile(r"^(\s*)([-+*]|\d+\.|[A-Za-z]\.)\s+(.*)$")
 
@@ -177,6 +177,8 @@ QUOTE_PREFIX_RE = re.compile(r"^\s*(>\s*)+")
 INLINE_TOKEN_RE = re.compile(r"(!?\[[^\]]+\]\([^)]+\)|\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
 
 GRAPHVIZ_LANGS = {"graphviz", "dot", "gv"}
+DEFAULT_DIAGRAM_SCALE = {"plantuml": 6.0, "graphviz": 4.0, "tex": 1.35}
+
 GRAPHVIZ_WORDS = {
     "digraph", "graph", "subgraph", "strict", "node", "edge", "label", "rankdir", "shape", "style",
     "color", "fillcolor", "fontname", "fontsize", "penwidth", "arrowhead", "arrowtail", "headlabel",
@@ -191,6 +193,37 @@ def pt_to_px(v: float) -> int:
 
 def html_unescape_minimal(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">" ).replace("&amp;", "&")
+
+
+def parse_fence_meta(raw: str) -> dict:
+    meta: dict = {}
+    if not raw:
+        return meta
+    for m in re.finditer(r"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s]+)", raw):
+        key = m.group(1).lower()
+        value = m.group(2).strip()
+        if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {'"', "'"}:
+            value = value[1:-1]
+        meta[key] = value
+    return meta
+
+
+def block_scale_multiplier(block: "Block") -> float:
+    raw = str(block.meta.get("scale", "")).strip()
+    if not raw:
+        return 1.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 1.0
+    if value <= 0:
+        return 1.0
+    return value
+
+
+def diagram_natural_scale(block: "Block") -> float:
+    base = DEFAULT_DIAGRAM_SCALE.get(block.kind, 1.0)
+    return base * block_scale_multiplier(block)
 
 
 @dataclass
@@ -490,6 +523,7 @@ class BlockParser:
                 flush_paragraph(i)
                 fence = m_fence.group(1)
                 lang = (m_fence.group(2) or "").strip().lower()
+                fence_meta = parse_fence_meta((m_fence.group(3) or "").strip())
                 start = i + 1
                 i += 1
                 code_lines: List[str] = []
@@ -507,7 +541,8 @@ class BlockParser:
                 else:
                     end = len(lines)
                 kind = {"plantuml": "plantuml", "puml": "plantuml", "tex": "tex", "graphviz": "graphviz", "dot": "graphviz", "gv": "graphviz"}.get(lang, "code")
-                blocks.append(Block(kind, start, end, text="\n".join(code_lines), meta={"lang": lang, "fence": fence}))
+                meta = {"lang": lang, "fence": fence, **fence_meta}
+                blocks.append(Block(kind, start, end, text="\n".join(code_lines), meta=meta))
                 continue
 
             if QUOTE_PREFIX_RE.match(line):
@@ -1123,7 +1158,7 @@ class LayoutEngine:
                         iw, ih = img.size
                     max_w_px = pt_to_px(CONTENT_WIDTH_PT)
                     max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
-                    natural_scale = 3.0 if block.kind == "plantuml" else 2.0 if block.kind == "graphviz" else 1.35
+                    natural_scale = diagram_natural_scale(block)
                     scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
                     w_pt = iw * scale / self.assets.dpi * 72.0
                     h_pt = ih * scale / self.assets.dpi * 72.0
@@ -1237,14 +1272,18 @@ class LayoutEngine:
             style = self.styles["code"]
             lines = block.text.splitlines() or [""]
             return 8 + len(lines) * style.leading + 12
-        if block.kind in {"plantuml", "tex"}:
+        if block.kind in {"plantuml", "graphviz", "tex"}:
             try:
-                path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_tex(block.text)
+                path = (
+                    self.assets.render_plantuml(block.text) if block.kind == "plantuml"
+                    else self.assets.render_graphviz(block.text) if block.kind == "graphviz"
+                    else self.assets.render_tex(block.text)
+                )
                 with Image.open(path) as img:
                     iw, ih = img.size
                 max_w_px = pt_to_px(CONTENT_WIDTH_PT)
                 max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                natural_scale = 3.0 if block.kind == "plantuml" else 2.0 if block.kind == "graphviz" else 1.35
+                natural_scale = diagram_natural_scale(block)
                 scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
                 h_pt = ih * scale / self.assets.dpi * 72.0
                 return h_pt + 8
@@ -1344,7 +1383,7 @@ class LayoutEngine:
                         iw, ih = img.size
                     max_w_px = pt_to_px(width)
                     max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                    natural_scale = 3.0 if block.kind == "plantuml" else 2.0 if block.kind == "graphviz" else 1.35
+                    natural_scale = diagram_natural_scale(block)
                     scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
                     w_pt = iw * scale / self.assets.dpi * 72.0
                     h_pt = ih * scale / self.assets.dpi * 72.0
@@ -1848,11 +1887,11 @@ if PYSIDE_AVAILABLE:
 
     def completions_for_lang(lang: str) -> List[str]:
         return {
-            "plantuml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle"],
-            "puml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle"],
-            "graphviz": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--"],
-            "dot": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--"],
-            "gv": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--"],
+            "plantuml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle", "scale=1.2"],
+            "puml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle", "scale=1.2"],
+            "graphviz": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--", "scale=1.2"],
+            "dot": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--", "scale=1.2"],
+            "gv": ["digraph", "graph", "subgraph", "node", "edge", "rankdir=LR", "label=\"\"", "shape=box", "style=rounded", "style=filled", "fillcolor=lightgray", "cluster_", "->", "--", "scale=1.2"],
             "tex": ["\\frac{}{}", "\\sqrt{}", "\\sum_{i=1}^{n}", "\\int_{a}^{b}", "\\alpha", "\\beta", "\\gamma", "\\begin{bmatrix}", "\\end{bmatrix}"],
             "python": ["def", "class", "import", "from", "if", "elif", "else", "for", "while", "return", "with"],
             "py": ["def", "class", "import", "from", "if", "elif", "else", "for", "while", "return", "with"],
