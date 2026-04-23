@@ -46,6 +46,7 @@ try:
         QAction,
         QColor,
         QFont,
+        QFontDatabase,
         QImage,
         QKeySequence,
         QPainter,
@@ -111,6 +112,58 @@ def runtime_dir() -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def bundled_font_roots() -> List[Path]:
+    roots: List[Path] = []
+    app_root = app_root_dir()
+    for candidate in (
+        app_root / "fonts",
+        app_root / "third_party" / "fonts",
+    ):
+        if candidate.exists():
+            roots.append(candidate)
+    rt = runtime_dir()
+    if rt:
+        for candidate in (
+            rt / "fonts",
+            rt / "third_party" / "fonts",
+        ):
+            if candidate.exists() and candidate not in roots:
+                roots.append(candidate)
+    return roots
+
+
+QT_FONT_FAMILIES: Dict[str, str] = {}
+
+
+def register_qt_application_fonts() -> Dict[str, str]:
+    families: Dict[str, str] = {}
+    if not PYSIDE_AVAILABLE:
+        return families
+    wanted = {
+        "sans": "DejaVuSans.ttf",
+        "sans_bold": "DejaVuSans-Bold.ttf",
+        "mono": "DejaVuSansMono.ttf",
+        "mono_bold": "DejaVuSansMono-Bold.ttf",
+    }
+    seen_paths = set()
+    for root in bundled_font_roots():
+        for key, filename in wanted.items():
+            path = root / filename
+            if not path.exists():
+                continue
+            norm = str(path.resolve())
+            if norm in seen_paths:
+                continue
+            seen_paths.add(norm)
+            font_id = QFontDatabase.addApplicationFont(str(path))
+            if font_id < 0:
+                continue
+            loaded = QFontDatabase.applicationFontFamilies(font_id)
+            if loaded and key not in families:
+                families[key] = loaded[0]
+    return families
 
 
 def prepend_env_path(name: str, path: Path) -> None:
@@ -369,7 +422,7 @@ class FontRegistry:
             "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
         ])
         if not self.sans_path or not self.sans_bold_path or not self.mono_path or not self.mono_bold_path:
-            raise RenderError("DejaVu fonts were not found on the system. Install dejavu fonts.")
+            raise RenderError("DejaVu fonts were not found. Bundle them in the repository fonts/ directory or install them on the system.")
         self._registered = False
         self._pil_cache: Dict[Tuple[str, int, bool, bool], ImageFont.FreeTypeFont] = {}
 
@@ -382,15 +435,13 @@ class FontRegistry:
 
     @staticmethod
     def _find_font_candidates(candidates: Sequence[str]) -> Optional[str]:
-        rt = runtime_dir()
         expanded: List[str] = []
-        if rt:
-            fonts_root = rt / "fonts"
+        for root in bundled_font_roots():
             for name in candidates:
                 if os.path.isabs(name):
                     expanded.append(name)
                 else:
-                    expanded.append(str(fonts_root / name))
+                    expanded.append(str(root / name))
         expanded.extend(candidates)
         return FontRegistry._find_font(expanded)
 
@@ -1832,7 +1883,7 @@ if PYSIDE_AVAILABLE:
 
         def __init__(self) -> None:
             super().__init__()
-            self.setFont(QFont("DejaVu Sans Mono", 11))
+            self.setFont(QFont(QT_FONT_FAMILIES.get("mono", "DejaVu Sans Mono"), 11))
             self.setLineWrapMode(QPlainTextEdit.NoWrap)
             self.setWordWrapMode(QTextOption.NoWrap)
             self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 8)
@@ -2329,7 +2380,9 @@ def run_gui(file_path: Optional[str], plantuml_cmd: str) -> int:
     if not PYSIDE_AVAILABLE:
         print("error: PySide6 is not installed. Install requirements and try again.", file=sys.stderr)
         return 1
+    global QT_FONT_FAMILIES
     app = QApplication(sys.argv)
+    QT_FONT_FAMILIES = register_qt_application_fonts()
     win = MainWindow(file_path, plantuml_cmd=plantuml_cmd)
     win.show()
     return app.exec()
