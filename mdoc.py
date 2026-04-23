@@ -177,7 +177,10 @@ QUOTE_PREFIX_RE = re.compile(r"^\s*(>\s*)+")
 INLINE_TOKEN_RE = re.compile(r"(!?\[[^\]]+\]\([^)]+\)|\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)")
 
 GRAPHVIZ_LANGS = {"graphviz", "dot", "gv"}
-DEFAULT_DIAGRAM_SCALE = {"plantuml": 6.0, "graphviz": 4.0, "tex": 1.35}
+# Default display-scale coefficients applied to rendered diagram images before
+# page-fit clamping. Tweak these in one place to adjust the global visual size
+# of each renderer kind.
+DEFAULT_RENDERED_IMAGE_SCALE = {"plantuml": 3, "graphviz": 2, "tex": 1}
 
 GRAPHVIZ_WORDS = {
     "digraph", "graph", "subgraph", "strict", "node", "edge", "label", "rankdir", "shape", "style",
@@ -221,9 +224,26 @@ def block_scale_multiplier(block: "Block") -> float:
     return value
 
 
-def diagram_natural_scale(block: "Block") -> float:
-    base = DEFAULT_DIAGRAM_SCALE.get(block.kind, 1.0)
+def rendered_image_scale(block: "Block") -> float:
+    base = DEFAULT_RENDERED_IMAGE_SCALE.get(block.kind, 1.0)
     return base * block_scale_multiplier(block)
+
+
+def fit_rendered_image(iw: int, ih: int, dpi: int, max_width_pt: float, max_height_pt: float, requested_scale: float) -> Tuple[float, float]:
+    """Scale a rendered image, then clamp it proportionally to the available area."""
+    if iw <= 0 or ih <= 0 or dpi <= 0:
+        return 0.0, 0.0
+
+    req_scale = requested_scale if requested_scale > 0 else 1.0
+    width_pt = iw * req_scale / dpi * 72.0
+    height_pt = ih * req_scale / dpi * 72.0
+
+    fit_ratio = min(
+        max_width_pt / width_pt if width_pt > 0 else 1.0,
+        max_height_pt / height_pt if height_pt > 0 else 1.0,
+        1.0,
+    )
+    return width_pt * fit_ratio, height_pt * fit_ratio
 
 
 @dataclass
@@ -1156,12 +1176,9 @@ class LayoutEngine:
                     )
                     with Image.open(path) as img:
                         iw, ih = img.size
-                    max_w_px = pt_to_px(CONTENT_WIDTH_PT)
-                    max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
-                    natural_scale = diagram_natural_scale(block)
-                    scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
-                    w_pt = iw * scale / self.assets.dpi * 72.0
-                    h_pt = ih * scale / self.assets.dpi * 72.0
+                    w_pt, h_pt = fit_rendered_image(
+                        iw, ih, self.assets.dpi, CONTENT_WIDTH_PT, CONTENT_HEIGHT_PT, rendered_image_scale(block)
+                    )
                     ensure_space(h_pt + 8)
                     x = PAGE_MARGIN_PT + (CONTENT_WIDTH_PT - w_pt) / 2
                     current.elements.append(ImageElement(x, y, w_pt, h_pt, path))
@@ -1281,11 +1298,9 @@ class LayoutEngine:
                 )
                 with Image.open(path) as img:
                     iw, ih = img.size
-                max_w_px = pt_to_px(CONTENT_WIDTH_PT)
-                max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                natural_scale = diagram_natural_scale(block)
-                scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
-                h_pt = ih * scale / self.assets.dpi * 72.0
+                _, h_pt = fit_rendered_image(
+                    iw, ih, self.assets.dpi, CONTENT_WIDTH_PT, CONTENT_HEIGHT_PT, rendered_image_scale(block)
+                )
                 return h_pt + 8
             except Exception:
                 return 24.0
@@ -1381,12 +1396,9 @@ class LayoutEngine:
                     )
                     with Image.open(path) as img:
                         iw, ih = img.size
-                    max_w_px = pt_to_px(width)
-                    max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                    natural_scale = diagram_natural_scale(block)
-                    scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
-                    w_pt = iw * scale / self.assets.dpi * 72.0
-                    h_pt = ih * scale / self.assets.dpi * 72.0
+                    w_pt, h_pt = fit_rendered_image(
+                        iw, ih, self.assets.dpi, width, CONTENT_HEIGHT_PT, rendered_image_scale(block)
+                    )
                     img_x = x + (width - w_pt) / 2
                     elements.append(ImageElement(img_x, y, w_pt, h_pt, path))
                     y += h_pt + 8
