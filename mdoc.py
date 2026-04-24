@@ -177,6 +177,30 @@ def prepend_env_path(name: str, path: Path) -> None:
     os.environ[name] = os.pathsep.join(parts)
 
 
+def bundled_dot_path() -> Optional[Path]:
+    rt = runtime_dir()
+    if not rt:
+        return None
+    dot_name = "dot.exe" if os.name == "nt" else "dot"
+    dot_path = rt / "graphviz" / "bin" / dot_name
+    return dot_path if dot_path.exists() else None
+
+
+def quiet_subprocess_run(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+        "check": False,
+    }
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = startupinfo
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.run(cmd, **kwargs)
+
+
 def bundled_plantuml_cmd() -> Optional[str]:
     rt = runtime_dir()
     if not rt:
@@ -202,7 +226,12 @@ def bootstrap_runtime_environment() -> None:
         dot_name = "dot.exe" if os.name == "nt" else "dot"
         dot_path = graphviz_bin / dot_name
         if dot_path.exists():
-            os.environ.setdefault("GRAPHVIZ_DOT", str(dot_path))
+            # A user/build machine may already have GRAPHVIZ_DOT pointing to a system
+            # install such as C:\\Program Files\\Graphviz. In a frozen app the bundled
+            # runtime must win, otherwise Windows builds fail on machines without that
+            # exact external installation.
+            os.environ["GRAPHVIZ_DOT"] = str(dot_path)
+            os.environ["PLANTUML_GRAPHVIZ_DOT"] = str(dot_path)
     if graphviz_lib.exists():
         prepend_env_path("PATH", graphviz_lib)
         os.environ.setdefault("GVBINDIR", str(graphviz_bin))
@@ -738,7 +767,7 @@ class AssetRenderer:
             src.write_text(source, encoding="utf-8")
             cmd = shlex.split(self.plantuml_cmd) + ["-tpng", "-DPLANTUML_LIMIT_SIZE=8192", str(src)]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                proc = quiet_subprocess_run(cmd)
             except FileNotFoundError as exc:
                 raise RenderError("PlantUML executable was not found.") from exc
             if proc.returncode != 0:
@@ -753,13 +782,14 @@ class AssetRenderer:
         out = self.cache.path_for("graphviz", source)
         if out.exists():
             return str(out)
-        dot_cmd = os.environ.get("GRAPHVIZ_DOT") or "dot"
+        bundled_dot = bundled_dot_path()
+        dot_cmd = str(bundled_dot) if bundled_dot else (os.environ.get("GRAPHVIZ_DOT") or "dot")
         with tempfile.TemporaryDirectory(prefix="md_doc_studio_dot_") as td:
             src = Path(td) / "diagram.dot"
             src.write_text(source, encoding="utf-8")
             cmd = [dot_cmd, "-Tpng", f"-Gdpi={self.dpi}", str(src), "-o", str(out)]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                proc = quiet_subprocess_run(cmd)
             except FileNotFoundError as exc:
                 raise RenderError("Graphviz dot executable was not found.") from exc
             if proc.returncode != 0:
