@@ -6,7 +6,7 @@ __pycache__
 build/
 dist/
 __pycache__/
-third_party/
+third_party/plantuml/
 *.zip
 *.tar.gz
 *.patch
