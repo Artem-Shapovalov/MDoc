@@ -562,7 +562,14 @@ class BlockParser:
                     i += 1
                 else:
                     end = len(lines)
-                kind = {"plantuml": "plantuml", "puml": "plantuml", "tex": "tex"}.get(lang, "code")
+                kind = {
+                    "plantuml": "plantuml",
+                    "puml": "plantuml",
+                    "graphviz": "graphviz",
+                    "dot": "graphviz",
+                    "gv": "graphviz",
+                    "tex": "tex",
+                }.get(lang, "code")
                 blocks.append(Block(kind, start, end, text="\n".join(code_lines), meta={"lang": lang, "fence": fence}))
                 continue
 
@@ -685,6 +692,25 @@ class AssetRenderer:
             if not png.exists():
                 raise RenderError("PlantUML did not produce a PNG file.")
             Image.open(png).save(out)
+        return str(out)
+
+    def render_graphviz(self, source: str) -> str:
+        out = self.cache.path_for("graphviz", source)
+        if out.exists():
+            return str(out)
+        dot_cmd = os.environ.get("GRAPHVIZ_DOT") or "dot"
+        with tempfile.TemporaryDirectory(prefix="md_doc_studio_dot_") as td:
+            src = Path(td) / "diagram.dot"
+            src.write_text(source, encoding="utf-8")
+            cmd = [dot_cmd, "-Tpng", f"-Gdpi={self.dpi}", str(src), "-o", str(out)]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            except FileNotFoundError as exc:
+                raise RenderError("Graphviz dot executable was not found.") from exc
+            if proc.returncode != 0:
+                raise RenderError(proc.stderr.strip() or proc.stdout.strip() or "Graphviz render failed")
+            if not out.exists():
+                raise RenderError("Graphviz did not produce a PNG file.")
         return str(out)
 
     def render_tex(self, source: str) -> str:
@@ -1148,14 +1174,14 @@ class LayoutEngine:
                 mark_lines(block)
                 continue
 
-            if block.kind in {"plantuml", "tex"}:
+            if block.kind in {"plantuml", "graphviz", "tex"}:
                 try:
-                    path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_tex(block.text)
+                    path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_graphviz(block.text) if block.kind == "graphviz" else self.assets.render_tex(block.text)
                     with Image.open(path) as img:
                         iw, ih = img.size
                     max_w_px = pt_to_px(CONTENT_WIDTH_PT)
                     max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
-                    natural_scale = 2.0 if block.kind == "plantuml" else 1.35
+                    natural_scale = 2.0 if block.kind in {"plantuml", "graphviz"} else 1.35
                     scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
                     w_pt = iw * scale / self.assets.dpi * 72.0
                     h_pt = ih * scale / self.assets.dpi * 72.0
@@ -1269,14 +1295,14 @@ class LayoutEngine:
             style = self.styles["code"]
             lines = block.text.splitlines() or [""]
             return 8 + len(lines) * style.leading + 12
-        if block.kind in {"plantuml", "tex"}:
+        if block.kind in {"plantuml", "graphviz", "tex"}:
             try:
-                path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_tex(block.text)
+                path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_graphviz(block.text) if block.kind == "graphviz" else self.assets.render_tex(block.text)
                 with Image.open(path) as img:
                     iw, ih = img.size
                 max_w_px = pt_to_px(CONTENT_WIDTH_PT)
                 max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                natural_scale = 2.0 if block.kind == "plantuml" else 1.35
+                natural_scale = 2.0 if block.kind in {"plantuml", "graphviz"} else 1.35
                 scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
                 h_pt = ih * scale / self.assets.dpi * 72.0
                 return h_pt + 8
@@ -1365,14 +1391,14 @@ class LayoutEngine:
                     elements.append(TextElement(x, y, width, lines, style))
                     y += self.measure.text_height(lines, style) + 6
                     warnings.append(str(exc))
-            elif block.kind in {"plantuml", "tex"}:
+            elif block.kind in {"plantuml", "graphviz", "tex"}:
                 try:
-                    path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_tex(block.text)
+                    path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_graphviz(block.text) if block.kind == "graphviz" else self.assets.render_tex(block.text)
                     with Image.open(path) as img:
                         iw, ih = img.size
                     max_w_px = pt_to_px(width)
                     max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                    natural_scale = 2.0 if block.kind == "plantuml" else 1.35
+                    natural_scale = 2.0 if block.kind in {"plantuml", "graphviz"} else 1.35
                     scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
                     w_pt = iw * scale / self.assets.dpi * 72.0
                     h_pt = ih * scale / self.assets.dpi * 72.0
@@ -1866,6 +1892,9 @@ if PYSIDE_AVAILABLE:
         return {
             "plantuml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle"],
             "puml": ["@startuml", "@enduml", "participant", "actor", "component", "package", "database", "note left", "note right", "left to right direction", "skinparam", "rectangle"],
+            "graphviz": ["digraph G {", "graph G {", "rankdir=LR", "node [shape=box]", "edge [label=\"\"]", "subgraph cluster_", "label=\"\"", "->", "--"],
+            "dot": ["digraph G {", "graph G {", "rankdir=LR", "node [shape=box]", "->", "--"],
+            "gv": ["digraph G {", "graph G {", "rankdir=LR", "node [shape=box]", "->", "--"],
             "tex": ["\\frac{}{}", "\\sqrt{}", "\\sum_{i=1}^{n}", "\\int_{a}^{b}", "\\alpha", "\\beta", "\\gamma", "\\begin{bmatrix}", "\\end{bmatrix}"],
             "python": ["def", "class", "import", "from", "if", "elif", "else", "for", "while", "return", "with"],
             "py": ["def", "class", "import", "from", "if", "elif", "else", "for", "while", "return", "with"],
