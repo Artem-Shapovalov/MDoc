@@ -259,9 +259,9 @@ def bundled_subprocess_env() -> Dict[str, str]:
         env.pop("PLANTUML_GRAPHVIZ_DOT", None)
 
     if graphviz_lib.exists():
-        plugin_config_dir = graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
+        plugin_config_dir = graphviz_bin if os.name == "nt" else graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
         env["GVBINDIR"] = str(plugin_config_dir)
-        if graphviz_plugin_dir.exists():
+        if graphviz_plugin_dir.exists() and os.name != "nt":
             for name in ("GV_PLUGIN_PATH", "GRAPHVIZ_PLUGIN_PATH"):
                 env[name] = str(graphviz_plugin_dir)
         if sys.platform == "darwin":
@@ -359,9 +359,9 @@ def bootstrap_runtime_environment() -> None:
         os.environ.pop("PLANTUML_GRAPHVIZ_DOT", None)
     if graphviz_lib.exists():
         prepend_env_path("PATH", graphviz_lib)
-        plugin_config_dir = graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
+        plugin_config_dir = graphviz_bin if os.name == "nt" else graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
         os.environ["GVBINDIR"] = str(plugin_config_dir)
-        if graphviz_plugin_dir.exists():
+        if graphviz_plugin_dir.exists() and os.name != "nt":
             for name in ("GV_PLUGIN_PATH", "GRAPHVIZ_PLUGIN_PATH"):
                 os.environ[name] = str(graphviz_plugin_dir)
         if sys.platform == "darwin":

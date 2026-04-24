@@ -119,9 +119,9 @@ def graphviz_runtime_env(runtime_root: Path) -> dict[str, str]:
     env["GRAPHVIZ_DOT"] = str(dot)
     env["PLANTUML_GRAPHVIZ_DOT"] = str(dot)
     if graphviz_lib.exists():
-        plugin_config_dir = graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
+        plugin_config_dir = graphviz_bin if IS_WIN else graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
         env["GVBINDIR"] = str(plugin_config_dir)
-        if graphviz_plugin_dir.exists():
+        if graphviz_plugin_dir.exists() and not IS_WIN:
             env["GV_PLUGIN_PATH"] = str(graphviz_plugin_dir)
             env["GRAPHVIZ_PLUGIN_PATH"] = str(graphviz_plugin_dir)
         if IS_MAC:
@@ -131,6 +131,26 @@ def graphviz_runtime_env(runtime_root: Path) -> dict[str, str]:
             existing = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = str(graphviz_lib) + (os.pathsep + existing if existing else "")
     return env
+
+
+def configure_graphviz_runtime(runtime_root: Path) -> None:
+    if not IS_WIN:
+        return
+
+    dot = runtime_root / "graphviz" / "bin" / ("dot.exe" if IS_WIN else "dot")
+    if not dot.exists():
+        raise RuntimeError(f"Graphviz executable was not bundled: {dot}")
+
+    proc = subprocess.run(
+        [str(dot), "-c"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=graphviz_runtime_env(runtime_root),
+    )
+    if proc.returncode != 0:
+        message = proc.stderr.strip() or proc.stdout.strip() or "Graphviz plugin configuration failed"
+        raise RuntimeError(f"bundled Graphviz runtime failed plugin configuration: {message}")
 
 
 def validate_graphviz_runtime(runtime_root: Path) -> None:
@@ -198,6 +218,7 @@ def copy_graphviz(runtime_root: Path) -> None:
             copy_file(dot.parent / "config6", bin_dir / "config6")
         if (root / "lib" / "graphviz").exists():
             copy_tree(root / "lib" / "graphviz", target / "lib" / "graphviz")
+        configure_graphviz_runtime(runtime_root)
         validate_graphviz_runtime(runtime_root)
         return
 
@@ -206,6 +227,7 @@ def copy_graphviz(runtime_root: Path) -> None:
         _copy_graphviz_libs(root / "lib", lib_dir)
         if (root / "lib" / "graphviz").exists():
             copy_tree(root / "lib" / "graphviz", target / "lib" / "graphviz")
+        configure_graphviz_runtime(runtime_root)
         validate_graphviz_runtime(runtime_root)
         return
 
@@ -229,6 +251,7 @@ def copy_graphviz(runtime_root: Path) -> None:
         if plugin_dir.exists():
             copy_tree(plugin_dir, target / "lib" / "graphviz")
             break
+    configure_graphviz_runtime(runtime_root)
     validate_graphviz_runtime(runtime_root)
 
 
