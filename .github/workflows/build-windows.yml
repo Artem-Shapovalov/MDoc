@@ -97,13 +97,17 @@ jobs:
         run: |
           if (-not (Test-Path "dist/MDoc/MDoc.exe")) { throw "dist/MDoc/MDoc.exe was not produced" }
           if (-not (Test-Path "dist/MDoc/runtime/graphviz/bin/dot.exe")) { throw "Bundled Graphviz dot.exe was not produced" }
+          $smokeMarkdown = Join-Path $env:RUNNER_TEMP "mdoc-graphviz-smoke.md"
+          $smokePdf = Join-Path $env:RUNNER_TEMP "mdoc-graphviz-smoke.pdf"
+          Remove-Item -Force -ErrorAction SilentlyContinue $smokePdf
           @"
           ```graphviz
           digraph G { a -> b }
           ```
-          "@ | Out-File -FilePath smoke.md -Encoding utf8
-          dist/MDoc/MDoc.exe --export-pdf smoke.md -o smoke.pdf
-          if (-not (Test-Path "smoke.pdf")) { throw "Graphviz smoke PDF was not produced" }
+          "@ | Out-File -FilePath $smokeMarkdown -Encoding utf8
+          dist/MDoc/MDoc.exe --export-pdf $smokeMarkdown -o $smokePdf
+          if (-not (Test-Path $smokePdf)) { throw "Graphviz smoke PDF was not produced at $smokePdf" }
+          if ((Get-Item $smokePdf).Length -le 0) { throw "Graphviz smoke PDF is empty: $smokePdf" }
       - name: Archive bundle
         shell: pwsh
         run: Compress-Archive -Path "dist/MDoc/*" -DestinationPath "${{ matrix.archive_name }}"
