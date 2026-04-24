@@ -91,6 +91,9 @@ PREVIEW_ZOOM_MIN = 0.25
 PREVIEW_ZOOM_MAX = 4.00
 PREVIEW_ZOOM_STEP = 1.12
 EDITOR_SYNC_GUARD_MS = 120
+PLANTUML_RENDER_SCALE = 3.25
+GRAPHVIZ_RENDER_SCALE = 0.75
+TEX_RENDER_SCALE = 1.0
 
 
 def app_root_dir() -> Path:
@@ -221,10 +224,59 @@ bootstrap_runtime_environment()
 TITLE_LINE_RE = re.compile(r"^\s*#\s+Title:\s*(.+?)\s*$")
 TOC_LINE_RE = re.compile(r"^\s*#\s+TOC\s*$")
 PAGEBREAK_RE = re.compile(r"^\s*<!--\s*pagebreak\s*-->\s*$")
-FENCE_RE = re.compile(r"^([`~]{3,})\s*([A-Za-z0-9_+#.-]*)\s*$")
+FENCE_RE = re.compile(r"^([`~]{3,})\s*([^`~]*)$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$")
 LIST_ITEM_RE = re.compile(r"^(\s*)([-+*]|\d+\.|[A-Za-z]\.)\s+(.*)$")
 
+
+
+
+def parse_code_fence_info(info: str) -> Tuple[str, Dict[str, str]]:
+    parts = (info or "").strip().split()
+    if not parts:
+        return "", {}
+    lang = parts[0].lower()
+    attrs: Dict[str, str] = {}
+    for part in parts[1:]:
+        if "=" not in part:
+            attrs[part.lower()] = ""
+            continue
+        key, value = part.split("=", 1)
+        attrs[key.strip().lower()] = value.strip()
+    return lang, attrs
+
+
+def code_block_user_scale(block: Block) -> float:
+    raw = (block.meta or {}).get("scale")
+    if raw is None:
+        return 1.0
+    try:
+        value = float(str(raw))
+    except (TypeError, ValueError):
+        return 1.0
+    if value <= 0:
+        return 1.0
+    return value
+
+
+def code_block_first_scale(kind: str) -> float:
+    if kind == "plantuml":
+        return PLANTUML_RENDER_SCALE
+    if kind == "graphviz":
+        return GRAPHVIZ_RENDER_SCALE
+    if kind == "tex":
+        return TEX_RENDER_SCALE
+    return 1.0
+
+
+def rendered_code_block_size(iw: int, ih: int, dpi: int, max_width_pt: float, max_height_pt: float, first_scale: float, user_scale: float) -> Tuple[float, float]:
+    # Convert the available page area to pixels at the same DPI as the rendered raster image.
+    # Do not use pt_to_px() here: it is tied to PREVIEW_DPI and accepts only one argument.
+    max_w_px = max_width_pt / 72.0 * dpi
+    max_h_px = max_height_pt / 72.0 * dpi
+    requested_scale = first_scale * user_scale
+    scale = min(requested_scale, max_w_px / iw, max_h_px / ih)
+    return iw * scale / dpi * 72.0, ih * scale / dpi * 72.0
 
 def list_indent_to_level(indent: str) -> int:
     """Convert whitespace before a list marker into a nesting level.
@@ -545,7 +597,7 @@ class BlockParser:
             if m_fence:
                 flush_paragraph(i)
                 fence = m_fence.group(1)
-                lang = (m_fence.group(2) or "").strip().lower()
+                lang, attrs = parse_code_fence_info(m_fence.group(2) or "")
                 start = i + 1
                 i += 1
                 code_lines: List[str] = []
@@ -570,7 +622,10 @@ class BlockParser:
                     "gv": "graphviz",
                     "tex": "tex",
                 }.get(lang, "code")
-                blocks.append(Block(kind, start, end, text="\n".join(code_lines), meta={"lang": lang, "fence": fence}))
+                meta = {"lang": lang, "fence": fence}
+                if "scale" in attrs:
+                    meta["scale"] = attrs["scale"]
+                blocks.append(Block(kind, start, end, text="\n".join(code_lines), meta=meta))
                 continue
 
             if QUOTE_PREFIX_RE.match(line):
@@ -1179,12 +1234,12 @@ class LayoutEngine:
                     path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_graphviz(block.text) if block.kind == "graphviz" else self.assets.render_tex(block.text)
                     with Image.open(path) as img:
                         iw, ih = img.size
-                    max_w_px = pt_to_px(CONTENT_WIDTH_PT)
-                    max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.7)
-                    natural_scale = 2.0 if block.kind in {"plantuml", "graphviz"} else 1.35
-                    scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
-                    w_pt = iw * scale / self.assets.dpi * 72.0
-                    h_pt = ih * scale / self.assets.dpi * 72.0
+                    w_pt, h_pt = rendered_code_block_size(
+                        iw, ih, self.assets.dpi,
+                        CONTENT_WIDTH_PT, CONTENT_HEIGHT_PT,
+                        code_block_first_scale(block.kind),
+                        code_block_user_scale(block),
+                    )
                     ensure_space(h_pt + 8)
                     x = PAGE_MARGIN_PT + (CONTENT_WIDTH_PT - w_pt) / 2
                     current.elements.append(ImageElement(x, y, w_pt, h_pt, path))
@@ -1300,11 +1355,12 @@ class LayoutEngine:
                 path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_graphviz(block.text) if block.kind == "graphviz" else self.assets.render_tex(block.text)
                 with Image.open(path) as img:
                     iw, ih = img.size
-                max_w_px = pt_to_px(CONTENT_WIDTH_PT)
-                max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                natural_scale = 2.0 if block.kind in {"plantuml", "graphviz"} else 1.35
-                scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
-                h_pt = ih * scale / self.assets.dpi * 72.0
+                _w_pt, h_pt = rendered_code_block_size(
+                    iw, ih, self.assets.dpi,
+                    CONTENT_WIDTH_PT, CONTENT_HEIGHT_PT,
+                    code_block_first_scale(block.kind),
+                    code_block_user_scale(block),
+                )
                 return h_pt + 8
             except Exception:
                 return 24.0
@@ -1396,12 +1452,12 @@ class LayoutEngine:
                     path = self.assets.render_plantuml(block.text) if block.kind == "plantuml" else self.assets.render_graphviz(block.text) if block.kind == "graphviz" else self.assets.render_tex(block.text)
                     with Image.open(path) as img:
                         iw, ih = img.size
-                    max_w_px = pt_to_px(width)
-                    max_h_px = pt_to_px(CONTENT_HEIGHT_PT * 0.5)
-                    natural_scale = 2.0 if block.kind in {"plantuml", "graphviz"} else 1.35
-                    scale = min(natural_scale, max_w_px / iw, max_h_px / ih)
-                    w_pt = iw * scale / self.assets.dpi * 72.0
-                    h_pt = ih * scale / self.assets.dpi * 72.0
+                    w_pt, h_pt = rendered_code_block_size(
+                        iw, ih, self.assets.dpi,
+                        width, CONTENT_HEIGHT_PT,
+                        code_block_first_scale(block.kind),
+                        code_block_user_scale(block),
+                    )
                     img_x = x + (width - w_pt) / 2
                     elements.append(ImageElement(img_x, y, w_pt, h_pt, path))
                     y += h_pt + 8
@@ -1831,7 +1887,7 @@ if PYSIDE_AVAILABLE:
 
             if m:
                 fence = m.group(1)
-                lang = (m.group(2) or "").strip().lower()
+                lang, _attrs = parse_code_fence_info(m.group(2) or "")
                 self.setFormat(0, len(text), self.formats["fence"])
                 self.setCurrentBlockState(1)
                 self._set_block_userdata(True, lang, fence)
