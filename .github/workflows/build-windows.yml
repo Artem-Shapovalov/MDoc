@@ -59,7 +59,27 @@ jobs:
       - name: Resolve tool paths
         shell: pwsh
         run: |
-          $dot = (Get-Command dot).Source
+          $dotCommand = Get-Command dot.exe -All |
+            Where-Object { $_.Source -match '\\Graphviz\\bin\\dot\.exe$' } |
+            Select-Object -First 1
+          if (-not $dotCommand) {
+            $dotCommand = Get-Command dot.exe -All |
+              Where-Object { $_.Source -notmatch '\\chocolatey\\bin\\' } |
+              Select-Object -First 1
+          }
+          if (-not $dotCommand) {
+            $dotCandidate = Join-Path $env:ProgramFiles "Graphviz\bin\dot.exe"
+            if (Test-Path $dotCandidate) {
+              $dot = $dotCandidate
+            }
+          }
+          if (-not $dotCommand) {
+            if (-not $dot) {
+              throw "Could not resolve the real Graphviz dot.exe; refusing to bundle a Chocolatey shim."
+            }
+          } else {
+            $dot = $dotCommand.Source
+          }
           $java = (Get-Command java).Source
           "GRAPHVIZ_DOT=$dot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "JAVA_BIN=$java" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -76,6 +96,14 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "dist/MDoc/MDoc.exe")) { throw "dist/MDoc/MDoc.exe was not produced" }
+          if (-not (Test-Path "dist/MDoc/runtime/graphviz/bin/dot.exe")) { throw "Bundled Graphviz dot.exe was not produced" }
+          @"
+          ```graphviz
+          digraph G { a -> b }
+          ```
+          "@ | Out-File -FilePath smoke.md -Encoding utf8
+          dist/MDoc/MDoc.exe --export-pdf smoke.md -o smoke.pdf
+          if (-not (Test-Path "smoke.pdf")) { throw "Graphviz smoke PDF was not produced" }
       - name: Archive bundle
         shell: pwsh
         run: Compress-Archive -Path "dist/MDoc/*" -DestinationPath "${{ matrix.archive_name }}"

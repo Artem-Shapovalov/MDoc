@@ -115,6 +115,10 @@ def runtime_dir() -> Optional[Path]:
     if sys.platform == "darwin":
         candidates.append(root / "Contents" / "Resources" / "runtime")
     candidates.append(root / "runtime")
+    candidates.append(root / "_internal" / "runtime")
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "runtime")
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -890,7 +894,11 @@ class AssetRenderer:
         with tempfile.TemporaryDirectory(prefix="md_doc_studio_puml_") as td:
             src = Path(td) / "diagram.puml"
             src.write_text(source, encoding="utf-8")
-            cmd = plantuml_command_args(self.plantuml_cmd) + ["-tpng", "-DPLANTUML_LIMIT_SIZE=8192", str(src)]
+            cmd = plantuml_command_args(self.plantuml_cmd)
+            dot_path = bundled_dot_path()
+            if dot_path:
+                cmd += ["--dot-path", str(dot_path)]
+            cmd += ["-tpng", "-DPLANTUML_LIMIT_SIZE=8192", str(src)]
             try:
                 proc = quiet_subprocess_run(cmd)
             except FileNotFoundError as exc:

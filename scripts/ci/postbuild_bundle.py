@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,23 +57,100 @@ def env_path(name: str) -> Path:
 
 
 def resolve_graphviz_dot() -> Path:
-    dot = env_path("GRAPHVIZ_DOT").resolve()
     expected_name = "dot.exe" if IS_WIN else "dot"
-    if dot.name.lower() == expected_name:
-        return dot
+    candidates = []
 
+    dot = env_path("GRAPHVIZ_DOT")
+    candidates.append(dot)
     sibling = dot.with_name(expected_name)
     if sibling.exists():
-        return sibling.resolve()
+        candidates.append(sibling)
 
     resolved = shutil.which(expected_name)
     if resolved:
-        return Path(resolved).resolve()
+        candidates.append(Path(resolved))
 
-    if not IS_WIN and dot.name == expected_name:
-        return dot
+    if IS_WIN:
+        for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(env_name)
+            if root:
+                candidates.append(Path(root) / "Graphviz" / "bin" / expected_name)
 
-    raise RuntimeError(f"could not resolve real Graphviz executable {expected_name!r} from {dot}")
+    seen = set()
+    existing = []
+    for candidate in candidates:
+        key = str(candidate).lower() if IS_WIN else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists() and (candidate.name.lower() == expected_name or not IS_WIN):
+            existing.append(candidate)
+
+    if IS_WIN:
+        existing.sort(key=lambda path: "chocolatey" in str(path).lower())
+
+    for candidate in existing:
+        if graphviz_dot_works(candidate):
+            return candidate
+
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise RuntimeError(f"could not resolve a working Graphviz executable {expected_name!r}; searched: {searched}")
+
+
+def graphviz_dot_works(dot: Path) -> bool:
+    try:
+        proc = subprocess.run([str(dot), "-V"], capture_output=True, text=True, check=False)
+    except OSError:
+        return False
+    output = (proc.stdout + proc.stderr).lower()
+    return proc.returncode == 0 and "graphviz" in output
+
+
+def graphviz_runtime_env(runtime_root: Path) -> dict[str, str]:
+    target = runtime_root / "graphviz"
+    graphviz_bin = target / "bin"
+    graphviz_lib = target / "lib"
+    graphviz_plugin_dir = graphviz_lib / "graphviz"
+    env = os.environ.copy()
+    path_prefixes = [str(path) for path in (graphviz_bin, graphviz_lib) if path.exists()]
+    if path_prefixes:
+        env["PATH"] = os.pathsep.join(path_prefixes + ([env.get("PATH", "")] if env.get("PATH") else []))
+    dot = graphviz_bin / ("dot.exe" if IS_WIN else "dot")
+    env["GRAPHVIZ_DOT"] = str(dot)
+    env["PLANTUML_GRAPHVIZ_DOT"] = str(dot)
+    if graphviz_lib.exists():
+        plugin_config_dir = graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
+        env["GVBINDIR"] = str(plugin_config_dir)
+        if graphviz_plugin_dir.exists():
+            env["GV_PLUGIN_PATH"] = str(graphviz_plugin_dir)
+            env["GRAPHVIZ_PLUGIN_PATH"] = str(graphviz_plugin_dir)
+        if IS_MAC:
+            existing = env.get("DYLD_LIBRARY_PATH", "")
+            env["DYLD_LIBRARY_PATH"] = str(graphviz_lib) + (os.pathsep + existing if existing else "")
+        elif not IS_WIN:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = str(graphviz_lib) + (os.pathsep + existing if existing else "")
+    return env
+
+
+def validate_graphviz_runtime(runtime_root: Path) -> None:
+    dot = runtime_root / "graphviz" / "bin" / ("dot.exe" if IS_WIN else "dot")
+    if not dot.exists():
+        raise RuntimeError(f"Graphviz executable was not bundled: {dot}")
+    with tempfile.TemporaryDirectory(prefix="mdoc_graphviz_smoke_") as td:
+        src = Path(td) / "smoke.dot"
+        out = Path(td) / "smoke.png"
+        src.write_text("digraph G { a -> b }\n", encoding="utf-8")
+        proc = subprocess.run(
+            [str(dot), "-Tpng", str(src), "-o", str(out)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=graphviz_runtime_env(runtime_root),
+        )
+        if proc.returncode != 0 or not out.exists():
+            message = proc.stderr.strip() or proc.stdout.strip() or "Graphviz runtime smoke test did not produce PNG"
+            raise RuntimeError(f"bundled Graphviz runtime failed smoke test: {message}")
 
 
 def copy_plantuml(runtime_root: Path) -> None:
@@ -93,7 +171,7 @@ def _copy_graphviz_libs(src_dir: Path, dst_dir: Path) -> None:
     patterns = [
         "libgvc*", "libcgraph*", "libcdt*", "libpathplan*", "libxdot*", "libexpat*",
         "gvc*.dll", "cgraph*.dll", "cdt*.dll", "pathplan*.dll", "xdot*.dll", "expat*.dll",
-        "zlib*.dll", "libiconv*.dll",
+        "zlib*.dll", "libiconv*.dll", "*.dll",
     ]
     for pattern in patterns:
         for src in src_dir.glob(pattern):
@@ -112,8 +190,6 @@ def copy_graphviz(runtime_root: Path) -> None:
     # a stable bundled executable path at runtime.
     bundled_dot_name = "dot.exe" if IS_WIN else "dot"
     copy_file(dot, bin_dir / bundled_dot_name)
-    if not (bin_dir / bundled_dot_name).exists():
-        raise RuntimeError(f"Graphviz executable was not bundled: {bin_dir / bundled_dot_name}")
 
     if IS_WIN:
         root = dot.parent.parent
@@ -122,6 +198,7 @@ def copy_graphviz(runtime_root: Path) -> None:
             copy_file(dot.parent / "config6", bin_dir / "config6")
         if (root / "lib" / "graphviz").exists():
             copy_tree(root / "lib" / "graphviz", target / "lib" / "graphviz")
+        validate_graphviz_runtime(runtime_root)
         return
 
     if IS_MAC:
@@ -129,6 +206,7 @@ def copy_graphviz(runtime_root: Path) -> None:
         _copy_graphviz_libs(root / "lib", lib_dir)
         if (root / "lib" / "graphviz").exists():
             copy_tree(root / "lib" / "graphviz", target / "lib" / "graphviz")
+        validate_graphviz_runtime(runtime_root)
         return
 
     _copy_graphviz_libs(Path("/usr/lib"), lib_dir)
@@ -151,6 +229,7 @@ def copy_graphviz(runtime_root: Path) -> None:
         if plugin_dir.exists():
             copy_tree(plugin_dir, target / "lib" / "graphviz")
             break
+    validate_graphviz_runtime(runtime_root)
 
 
 def copy_java(runtime_root: Path) -> None:
