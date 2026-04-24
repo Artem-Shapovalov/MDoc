@@ -105,6 +105,10 @@ def app_root_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
 def runtime_dir() -> Optional[Path]:
     root = app_root_dir()
     candidates = []
@@ -211,14 +215,67 @@ def missing_bundled_dot_message() -> str:
     root = graphviz_runtime_root()
     if root:
         return f"Bundled Graphviz runtime is missing dot executable under {root}."
+    if frozen_app():
+        return f"Bundled Graphviz runtime was not found under {app_root_dir() / 'runtime'}."
     return "Graphviz dot executable was not found."
 
 
-def quiet_subprocess_run(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def missing_bundled_java_message() -> str:
+    rt = runtime_dir()
+    if rt:
+        return f"Bundled Java runtime is missing executable under {rt / 'java' / 'bin'}."
+    return f"Bundled runtime was not found under {app_root_dir() / 'runtime'}."
+
+
+def bundled_subprocess_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    rt = runtime_dir()
+    if not rt:
+        return env
+
+    path_prefixes: List[str] = []
+    graphviz_root = rt / "graphviz"
+    graphviz_bin = graphviz_root / "bin"
+    graphviz_lib = graphviz_root / "lib"
+    graphviz_plugin_dir = graphviz_lib / "graphviz"
+    java_bin = rt / "java" / "bin"
+    for path in (graphviz_bin, graphviz_lib, java_bin):
+        if path.exists():
+            path_prefixes.append(str(path))
+    if path_prefixes:
+        existing_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join(path_prefixes + ([existing_path] if existing_path else []))
+
+    dot_path = bundled_dot_path()
+    if dot_path:
+        env["GRAPHVIZ_DOT"] = str(dot_path)
+        env["PLANTUML_GRAPHVIZ_DOT"] = str(dot_path)
+    elif graphviz_root.exists() or frozen_app():
+        env.pop("GRAPHVIZ_DOT", None)
+        env.pop("PLANTUML_GRAPHVIZ_DOT", None)
+
+    if graphviz_lib.exists():
+        plugin_config_dir = graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
+        env["GVBINDIR"] = str(plugin_config_dir)
+        if graphviz_plugin_dir.exists():
+            for name in ("GV_PLUGIN_PATH", "GRAPHVIZ_PLUGIN_PATH"):
+                env[name] = str(graphviz_plugin_dir)
+        if sys.platform == "darwin":
+            existing = env.get("DYLD_LIBRARY_PATH", "")
+            env["DYLD_LIBRARY_PATH"] = str(graphviz_lib) + (os.pathsep + existing if existing else "")
+        elif os.name != "nt":
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = str(graphviz_lib) + (os.pathsep + existing if existing else "")
+
+    return env
+
+
+def quiet_subprocess_run(cmd: Sequence[str], env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess[str]:
     kwargs = {
         "capture_output": True,
         "text": True,
         "check": False,
+        "env": env or bundled_subprocess_env(),
     }
     if os.name == "nt":
         startupinfo = subprocess.STARTUPINFO()
@@ -247,6 +304,8 @@ def bundled_plantuml_args() -> Optional[List[str]]:
     java_bin = rt / "java" / "bin" / ("java.exe" if os.name == "nt" else "java")
     if java_bin.exists():
         cmd = [str(java_bin)]
+    elif frozen_app():
+        return None
     else:
         cmd = ["java"]
     if dot_arg:
@@ -268,7 +327,7 @@ def bundled_plantuml_cmd() -> Optional[str]:
 
 def plantuml_command_args(command: str) -> List[str]:
     bundled_args = bundled_plantuml_args()
-    if bundled_args and command == bundled_plantuml_cmd():
+    if bundled_args and (frozen_app() or command == bundled_plantuml_cmd()):
         return bundled_args
     return shlex.split(command)
 
@@ -280,6 +339,7 @@ def bootstrap_runtime_environment() -> None:
     graphviz_root = rt / "graphviz"
     graphviz_bin = graphviz_root / "bin"
     graphviz_lib = graphviz_root / "lib"
+    graphviz_plugin_dir = graphviz_lib / "graphviz"
     dot_path = bundled_dot_path()
     if graphviz_bin.exists():
         prepend_env_path("PATH", graphviz_bin)
@@ -295,9 +355,11 @@ def bootstrap_runtime_environment() -> None:
         os.environ.pop("PLANTUML_GRAPHVIZ_DOT", None)
     if graphviz_lib.exists():
         prepend_env_path("PATH", graphviz_lib)
-        os.environ.setdefault("GVBINDIR", str(graphviz_bin))
-        for name in ("GV_PLUGIN_PATH", "GRAPHVIZ_PLUGIN_PATH"):
-            os.environ.setdefault(name, str(graphviz_lib / "graphviz"))
+        plugin_config_dir = graphviz_plugin_dir if graphviz_plugin_dir.exists() else graphviz_bin
+        os.environ["GVBINDIR"] = str(plugin_config_dir)
+        if graphviz_plugin_dir.exists():
+            for name in ("GV_PLUGIN_PATH", "GRAPHVIZ_PLUGIN_PATH"):
+                os.environ[name] = str(graphviz_plugin_dir)
         if sys.platform == "darwin":
             existing = os.environ.get("DYLD_LIBRARY_PATH", "")
             os.environ["DYLD_LIBRARY_PATH"] = str(graphviz_lib) + (os.pathsep + existing if existing else "")
@@ -823,6 +885,8 @@ class AssetRenderer:
         out = self.cache.path_for("plantuml", source)
         if out.exists():
             return str(out)
+        if frozen_app() and not bundled_plantuml_args():
+            raise RenderError(missing_bundled_java_message())
         with tempfile.TemporaryDirectory(prefix="md_doc_studio_puml_") as td:
             src = Path(td) / "diagram.puml"
             src.write_text(source, encoding="utf-8")
@@ -846,7 +910,7 @@ class AssetRenderer:
         bundled_dot = bundled_dot_path()
         if bundled_dot:
             dot_cmd = str(bundled_dot)
-        elif graphviz_runtime_root():
+        elif graphviz_runtime_root() or frozen_app():
             raise RenderError(missing_bundled_dot_message())
         else:
             dot_cmd = os.environ.get("GRAPHVIZ_DOT") or "dot"

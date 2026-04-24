@@ -47,10 +47,32 @@ def env_path(name: str) -> Path:
     value = os.environ.get(name, "").strip()
     if not value:
         raise RuntimeError(f"required environment variable is missing: {name}")
+    if IS_WIN and len(value) >= 3 and value[0] == "/" and value[2] == "/":
+        value = f"{value[1].upper()}:{value[2:]}"
     path = Path(value)
     if not path.exists():
         raise RuntimeError(f"path from {name} does not exist: {path}")
     return path
+
+
+def resolve_graphviz_dot() -> Path:
+    dot = env_path("GRAPHVIZ_DOT").resolve()
+    expected_name = "dot.exe" if IS_WIN else "dot"
+    if dot.name.lower() == expected_name:
+        return dot
+
+    sibling = dot.with_name(expected_name)
+    if sibling.exists():
+        return sibling.resolve()
+
+    resolved = shutil.which(expected_name)
+    if resolved:
+        return Path(resolved).resolve()
+
+    if not IS_WIN and dot.name == expected_name:
+        return dot
+
+    raise RuntimeError(f"could not resolve real Graphviz executable {expected_name!r} from {dot}")
 
 
 def copy_plantuml(runtime_root: Path) -> None:
@@ -80,7 +102,7 @@ def _copy_graphviz_libs(src_dir: Path, dst_dir: Path) -> None:
 
 
 def copy_graphviz(runtime_root: Path) -> None:
-    dot = env_path("GRAPHVIZ_DOT").resolve()
+    dot = resolve_graphviz_dot()
     target = runtime_root / "graphviz"
     bin_dir = ensure_dir(target / "bin")
     lib_dir = ensure_dir(target / "lib")
@@ -90,6 +112,8 @@ def copy_graphviz(runtime_root: Path) -> None:
     # a stable bundled executable path at runtime.
     bundled_dot_name = "dot.exe" if IS_WIN else "dot"
     copy_file(dot, bin_dir / bundled_dot_name)
+    if not (bin_dir / bundled_dot_name).exists():
+        raise RuntimeError(f"Graphviz executable was not bundled: {bin_dir / bundled_dot_name}")
 
     if IS_WIN:
         root = dot.parent.parent
