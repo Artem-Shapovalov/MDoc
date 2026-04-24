@@ -84,7 +84,12 @@ def copy_graphviz(runtime_root: Path) -> None:
     target = runtime_root / "graphviz"
     bin_dir = ensure_dir(target / "bin")
     lib_dir = ensure_dir(target / "lib")
-    copy_file(dot, bin_dir / dot.name)
+
+    # Keep a canonical executable name in the runtime payload. Some Windows
+    # shells resolve `dot` to a wrapper, while the application and PlantUML need
+    # a stable bundled executable path at runtime.
+    bundled_dot_name = "dot.exe" if IS_WIN else "dot"
+    copy_file(dot, bin_dir / bundled_dot_name)
 
     if IS_WIN:
         root = dot.parent.parent

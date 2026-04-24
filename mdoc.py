@@ -181,9 +181,22 @@ def bundled_dot_path() -> Optional[Path]:
     rt = runtime_dir()
     if not rt:
         return None
-    dot_name = "dot.exe" if os.name == "nt" else "dot"
-    dot_path = rt / "graphviz" / "bin" / dot_name
-    return dot_path if dot_path.exists() else None
+
+    # The release bundles Graphviz under runtime/graphviz. Do not trust
+    # GRAPHVIZ_DOT from the build/user machine: on Windows it often points to
+    # C:\Program Files\Graphviz\bin\dot.exe, which does not exist on a clean
+    # target machine. Also be tolerant to package layout/name differences.
+    names = ["dot.exe", "dot.bat", "dot.cmd", "dot"] if os.name == "nt" else ["dot"]
+    search_dirs = (
+        rt / "graphviz" / "bin",
+        rt / "graphviz",
+    )
+    for directory in search_dirs:
+        for name in names:
+            dot_path = directory / name
+            if dot_path.exists():
+                return dot_path
+    return None
 
 
 def quiet_subprocess_run(cmd: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -208,10 +221,18 @@ def bundled_plantuml_cmd() -> Optional[str]:
     plantuml_jar = rt / "plantuml" / "plantuml.jar"
     if not plantuml_jar.exists():
         return None
+
+    # Force PlantUML to use the bundled Graphviz too. Passing the Java system
+    # property avoids stale external GRAPHVIZ_DOT values on Windows releases.
+    dot_arg = ""
+    dot_path = bundled_dot_path()
+    if dot_path:
+        dot_arg = f' -DGRAPHVIZ_DOT="{dot_path}"'
+
     java_bin = rt / "java" / "bin" / ("java.exe" if os.name == "nt" else "java")
     if java_bin.exists():
-        return f'"{java_bin}" -jar "{plantuml_jar}"'
-    return f'java -jar "{plantuml_jar}"'
+        return f'"{java_bin}"{dot_arg} -jar "{plantuml_jar}"'
+    return f'java{dot_arg} -jar "{plantuml_jar}"'
 
 
 def bootstrap_runtime_environment() -> None:
@@ -223,9 +244,8 @@ def bootstrap_runtime_environment() -> None:
     graphviz_lib = graphviz_root / "lib"
     if graphviz_bin.exists():
         prepend_env_path("PATH", graphviz_bin)
-        dot_name = "dot.exe" if os.name == "nt" else "dot"
-        dot_path = graphviz_bin / dot_name
-        if dot_path.exists():
+        dot_path = bundled_dot_path()
+        if dot_path:
             # A user/build machine may already have GRAPHVIZ_DOT pointing to a system
             # install such as C:\\Program Files\\Graphviz. In a frozen app the bundled
             # runtime must win, otherwise Windows builds fail on machines without that
