@@ -105,7 +105,12 @@ jobs:
           digraph G { a -> b }
           ```
           "@ | Out-File -FilePath $smokeMarkdown -Encoding utf8
-          dist/MDoc/MDoc.exe --export-pdf $smokeMarkdown -o $smokePdf
+          $mdocExe = Resolve-Path "dist/MDoc/MDoc.exe"
+          $proc = Start-Process -FilePath $mdocExe -ArgumentList @("--export-pdf", $smokeMarkdown, "-o", $smokePdf) -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "Graphviz smoke export failed with exit code $($proc.ExitCode)" }
+          for ($i = 0; $i -lt 20 -and -not (Test-Path $smokePdf); $i++) {
+            Start-Sleep -Milliseconds 250
+          }
           if (-not (Test-Path $smokePdf)) { throw "Graphviz smoke PDF was not produced at $smokePdf" }
           if ((Get-Item $smokePdf).Length -le 0) { throw "Graphviz smoke PDF is empty: $smokePdf" }
       - name: Archive bundle
